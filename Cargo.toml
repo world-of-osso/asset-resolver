@@ -4,10 +4,18 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 
+[features]
+default = ["casc"]
+casc = [
+  "dep:cascette-client-storage",
+  "dep:cascette-crypto",
+  "dep:cascette-formats",
+]
+
 [dependencies]
 binrw = "0.15.1"
 rusqlite = { version = "0.35", features = ["bundled"] }
 tokio = { version = "1", features = ["rt"] }
-cascette-client-storage = { git = "https://github.com/wowemulation-dev/cascette-rs", rev = "2d1294b", features = ["local-install"] }
-cascette-crypto = { git = "https://github.com/wowemulation-dev/cascette-rs", rev = "2d1294b" }
-cascette-formats = { git = "https://github.com/wowemulation-dev/cascette-rs", rev = "2d1294b" }
+cascette-client-storage = { git = "https://github.com/wowemulation-dev/cascette-rs", rev = "2d1294b", features = ["local-install"], optional = true }
+cascette-crypto = { git = "https://github.com/wowemulation-dev/cascette-rs", rev = "2d1294b", optional = true }
+cascette-formats = { git = "https://github.com/wowemulation-dev/cascette-rs", rev = "2d1294b", optional = true }
