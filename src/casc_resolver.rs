@@ -11,8 +11,9 @@ use std::sync::{Mutex, OnceLock};
 use binrw::BinRead;
 use cascette_client_storage::Installation;
 use cascette_client_storage::index::IndexManager;
-use cascette_client_storage::resolver::ContentResolver;
 use cascette_client_storage::storage::ArchiveManager;
+
+use crate::casc_cache::CascResolutionCache;
 use cascette_crypto::TactKeyStore;
 use cascette_formats::blte::BlteFile;
 use tokio::runtime::Handle as TokioHandle;
@@ -25,7 +26,7 @@ static CASC: OnceLock<Option<CascState>> = OnceLock::new();
 
 struct CascState {
     install: Installation,
-    resolver: ContentResolver,
+    cache: CascResolutionCache,
     initialized: Mutex<InitState>,
     local_access: Mutex<LocalAccessState>,
 }
@@ -209,22 +210,14 @@ pub fn resolve_bytes(fdid: u32) -> Option<Vec<u8>> {
         return None;
     }
 
-    let content_key = match casc.resolver.resolve_file_data_id(fdid) {
-        Some(content_key) => content_key,
+    let (_, encoding_key_bytes) = match casc.cache.resolve_fdid(fdid) {
+        Some(keys) => keys,
         None => {
-            eprintln!("asset-cache byte resolve failed: fdid {fdid}: missing content key");
+            eprintln!("asset-cache byte resolve failed: fdid {fdid}: missing resolution entry");
             return None;
         }
     };
-    let encoding_key = match casc.resolver.resolve_content_key(&content_key) {
-        Some(encoding_key) => encoding_key,
-        None => {
-            eprintln!(
-                "asset-cache byte resolve failed: fdid {fdid}: missing encoding key for content {content_key}"
-            );
-            return None;
-        }
-    };
+    let encoding_key = cascette_crypto::EncodingKey::from_bytes(encoding_key_bytes);
     match casc.read_file_by_encoding_key(&encoding_key) {
         Ok(data) => Some(data),
         Err(err) => {
@@ -240,16 +233,11 @@ fn extract_fdid_to_path(fdid: u32, out_path: &Path) -> Result<PathBuf, String> {
     let casc = get_casc()?;
     casc.ensure_initialized()?;
 
-    let content_key = casc
-        .resolver
-        .resolve_file_data_id(fdid)
-        .ok_or_else(|| format!("CASC resolve FDID {fdid}: missing content key in root"))?;
-    let encoding_key = casc
-        .resolver
-        .resolve_content_key(&content_key)
-        .ok_or_else(|| {
-            format!("CASC resolve FDID {fdid}: missing encoding key for content {content_key}")
-        })?;
+    let (_, encoding_key_bytes) = casc
+        .cache
+        .resolve_fdid(fdid)
+        .ok_or_else(|| format!("CASC resolve FDID {fdid}: missing resolution entry"))?;
+    let encoding_key = cascette_crypto::EncodingKey::from_bytes(encoding_key_bytes);
     let data = casc
         .read_file_by_encoding_key(&encoding_key)
         .map_err(|e| format!("CASC read FDID {fdid} via encoding key {encoding_key}: {e}"))?;
@@ -281,41 +269,17 @@ fn init_casc() -> Result<CascState, String> {
     }
 
     let install = Installation::open(data_root).map_err(|e| format!("CASC open: {e}"))?;
-    let resolver = ContentResolver::new();
 
     let casc_dir = crate::paths::shared_data_path("casc");
-    load_cached_resolution_files(&resolver, &casc_dir)?;
+    let cache = CascResolutionCache::open(&casc_dir)?;
 
     eprintln!("CASC resolver initialized from {WOW_DATA_PATH}");
     Ok(CascState {
         install,
-        resolver,
+        cache,
         initialized: Mutex::new(InitState::Uninitialized),
         local_access: Mutex::new(LocalAccessState::Uninitialized),
     })
-}
-
-fn load_cached_resolution_files(resolver: &ContentResolver, cache: &Path) -> Result<(), String> {
-    let root_path = cache.join("root.bin");
-    let enc_path = cache.join("encoding.bin");
-
-    let root_data = std::fs::read(&root_path).map_err(|e| {
-        format!(
-            "{}: {e} (run `casc-init` binary first)",
-            root_path.display()
-        )
-    })?;
-    resolver
-        .load_root_file(&root_data)
-        .map_err(|e| format!("resolver load root: {e}"))?;
-
-    let enc_data = std::fs::read(&enc_path)
-        .map_err(|e| format!("{}: {e} (run `casc-init` binary first)", enc_path.display()))?;
-    resolver
-        .load_encoding_file(&enc_data)
-        .map_err(|e| format!("resolver load encoding: {e}"))?;
-
-    Ok(())
 }
 
 fn load_tact_keys() -> TactKeyStore {

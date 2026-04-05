@@ -4,6 +4,9 @@ pub mod listfile_cache;
 mod paths;
 
 #[cfg(feature = "casc")]
+pub mod casc_cache;
+
+#[cfg(feature = "casc")]
 pub mod casc_resolver;
 
 #[derive(Debug, Default, Clone, Copy)]
