@@ -7,4 +7,4 @@
 
 ## Readability — Length (auto-detected)
 
-- [ ] `src/casc_cache.rs:83` `build_resolution_cache()` — 60 body lines (max 30)
+- [x] `src/casc_cache.rs:83` `build_resolution_cache()` — 60 body lines (max 30)

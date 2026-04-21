@@ -7,6 +7,8 @@ use cascette_crypto::{ContentKey, EncodingKey};
 use rusqlite::{Connection, OpenFlags};
 
 const SCHEMA_VERSION: i64 = 1;
+type FdidToContentKeyMap = HashMap<u32, ContentKey>;
+type ContentToEncodingKeyMap = HashMap<ContentKey, EncodingKey>;
 
 pub struct CascResolutionCache {
     conn: Mutex<Connection>,
@@ -107,7 +109,7 @@ fn resolution_paths(casc_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
 fn build_resolution_maps(
     root_path: &Path,
     enc_path: &Path,
-) -> Result<(HashMap<u32, ContentKey>, HashMap<ContentKey, EncodingKey>), String> {
+) -> Result<(FdidToContentKeyMap, ContentToEncodingKeyMap), String> {
     let root_data = read_cache_file(root_path)?;
     let enc_data = read_cache_file(enc_path)?;
     let root = cascette_formats::root::RootFile::parse(&root_data)
@@ -123,9 +125,7 @@ fn read_cache_file(path: &Path) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-fn collect_fdid_to_content_keys(
-    root: &cascette_formats::root::RootFile,
-) -> HashMap<u32, ContentKey> {
+fn collect_fdid_to_content_keys(root: &cascette_formats::root::RootFile) -> FdidToContentKeyMap {
     // last-write-wins, matches ContentResolver behavior
     let mut fdid_to_ck = HashMap::new();
     for block in &root.blocks {
@@ -138,7 +138,7 @@ fn collect_fdid_to_content_keys(
 
 fn collect_content_to_encoding_keys(
     encoding: &cascette_formats::encoding::EncodingFile,
-) -> HashMap<ContentKey, EncodingKey> {
+) -> ContentToEncodingKeyMap {
     // first encoding key per content
     let mut ck_to_ek = HashMap::new();
     for page in &encoding.ckey_pages {
@@ -176,8 +176,8 @@ fn init_resolution_schema(conn: &Connection) -> Result<(), String> {
 
 fn insert_resolution_rows(
     conn: &Connection,
-    fdid_to_ck: &HashMap<u32, ContentKey>,
-    ck_to_ek: &HashMap<ContentKey, EncodingKey>,
+    fdid_to_ck: &FdidToContentKeyMap,
+    ck_to_ek: &ContentToEncodingKeyMap,
 ) -> Result<usize, String> {
     let mut insert = conn
         .prepare("INSERT INTO resolution (fdid, content_key, encoding_key) VALUES (?1, ?2, ?3)")
