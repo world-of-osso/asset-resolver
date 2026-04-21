@@ -3,7 +3,7 @@
 
 ## Readability — Complexity (auto-detected)
 
-- [ ] `src/casc_cache.rs:83` `build_resolution_cache()` — Cyclomatic complexity 30.0 (max 20)
+- [x] `src/casc_cache.rs:83` `build_resolution_cache()` — Cyclomatic complexity 30.0 (max 20)
 
 ## Readability — Length (auto-detected)
 
