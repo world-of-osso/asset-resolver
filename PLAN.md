@@ -1,5 +1,5 @@
 - [x] Refactor `src/casc_cache.rs`: build_cache (line 115): 57 body lines (max 30) — extract into helper functions
-- [ ] Refactor `src/casc_cache.rs`: build_resolution_cache (line 83): 63 body lines (max 30) — extract into helper functions
+- [x] Refactor `src/casc_cache.rs`: build_resolution_cache (line 83): 63 body lines (max 30) — extract into helper functions
 
 ## Readability — Complexity (auto-detected)
 

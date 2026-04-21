@@ -1,8 +1,9 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::UNIX_EPOCH;
+use std::time::{Instant, UNIX_EPOCH};
 
+use cascette_crypto::{ContentKey, EncodingKey};
 use rusqlite::{Connection, OpenFlags};
 
 const SCHEMA_VERSION: i64 = 1;
@@ -81,47 +82,80 @@ impl CascResolutionCache {
 ///
 /// Called by `casc_refresh` after writing the binary files.
 pub fn build_resolution_cache(casc_dir: &Path) -> Result<(), String> {
-    let cache_path = casc_dir.join("resolution.sqlite");
-    let root_path = casc_dir.join("root.bin");
-    let enc_path = casc_dir.join("encoding.bin");
-
+    let (cache_path, root_path, enc_path) = resolution_paths(casc_dir);
     let root_mtime = file_mtime(&root_path)?;
     let enc_mtime = file_mtime(&enc_path)?;
+    let started_at = Instant::now();
+    let (fdid_to_ck, ck_to_ek) = build_resolution_maps(&root_path, &enc_path)?;
+    let conn = open_resolution_cache(&cache_path)?;
+    init_resolution_schema(&conn)?;
+    let inserted_rows = insert_resolution_rows(&conn, &fdid_to_ck, &ck_to_ek)?;
+    insert_resolution_metadata(&conn, root_mtime, enc_mtime)?;
+    commit_resolution_cache(&conn)?;
+    log_resolution_cache_build(inserted_rows, started_at);
+    Ok(())
+}
 
-    let t0 = std::time::Instant::now();
+fn resolution_paths(casc_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    (
+        casc_dir.join("resolution.sqlite"),
+        casc_dir.join("root.bin"),
+        casc_dir.join("encoding.bin"),
+    )
+}
 
-    let root_data = std::fs::read(&root_path)
-        .map_err(|e| format!("{}: {e}", root_path.display()))?;
-    let enc_data = std::fs::read(&enc_path)
-        .map_err(|e| format!("{}: {e}", enc_path.display()))?;
-
+fn build_resolution_maps(
+    root_path: &Path,
+    enc_path: &Path,
+) -> Result<(HashMap<u32, ContentKey>, HashMap<ContentKey, EncodingKey>), String> {
+    let root_data = read_cache_file(root_path)?;
+    let enc_data = read_cache_file(enc_path)?;
     let root = cascette_formats::root::RootFile::parse(&root_data)
         .map_err(|e| format!("parse root.bin: {e}"))?;
     let encoding = cascette_formats::encoding::EncodingFile::parse(&enc_data)
         .map_err(|e| format!("parse encoding.bin: {e}"))?;
+    let fdid_to_ck = collect_fdid_to_content_keys(&root);
+    let ck_to_ek = collect_content_to_encoding_keys(&encoding);
+    Ok((fdid_to_ck, ck_to_ek))
+}
 
-    // fdid → content_key (last-write-wins, matches ContentResolver behavior)
-    let mut fdid_to_ck: HashMap<u32, cascette_crypto::ContentKey> = HashMap::new();
+fn read_cache_file(path: &Path) -> Result<Vec<u8>, String> {
+    std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn collect_fdid_to_content_keys(
+    root: &cascette_formats::root::RootFile,
+) -> HashMap<u32, ContentKey> {
+    // last-write-wins, matches ContentResolver behavior
+    let mut fdid_to_ck = HashMap::new();
     for block in &root.blocks {
         for record in &block.records {
             fdid_to_ck.insert(record.file_data_id.get(), record.content_key);
         }
     }
+    fdid_to_ck
+}
 
-    // content_key → encoding_key (first encoding key per content)
-    let mut ck_to_ek: HashMap<cascette_crypto::ContentKey, cascette_crypto::EncodingKey> =
-        HashMap::new();
+fn collect_content_to_encoding_keys(
+    encoding: &cascette_formats::encoding::EncodingFile,
+) -> HashMap<ContentKey, EncodingKey> {
+    // first encoding key per content
+    let mut ck_to_ek = HashMap::new();
     for page in &encoding.ckey_pages {
         for entry in &page.entries {
-            if let Some(ek) = entry.encoding_keys.first() {
-                ck_to_ek.insert(entry.content_key, *ek);
+            if let Some(encoding_key) = entry.encoding_keys.first() {
+                ck_to_ek.insert(entry.content_key, *encoding_key);
             }
         }
     }
+    ck_to_ek
+}
 
-    let conn = Connection::open(&cache_path)
-        .map_err(|e| format!("open {}: {e}", cache_path.display()))?;
+fn open_resolution_cache(cache_path: &Path) -> Result<Connection, String> {
+    Connection::open(cache_path).map_err(|e| format!("open {}: {e}", cache_path.display()))
+}
 
+fn init_resolution_schema(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "BEGIN;
          DROP TABLE IF EXISTS metadata;
@@ -137,37 +171,58 @@ pub fn build_resolution_cache(casc_dir: &Path) -> Result<(), String> {
              encoding_key BLOB NOT NULL
          );",
     )
-    .map_err(|e| format!("init resolution cache schema: {e}"))?;
+    .map_err(|e| format!("init resolution cache schema: {e}"))
+}
 
+fn insert_resolution_rows(
+    conn: &Connection,
+    fdid_to_ck: &HashMap<u32, ContentKey>,
+    ck_to_ek: &HashMap<ContentKey, EncodingKey>,
+) -> Result<usize, String> {
     let mut insert = conn
         .prepare("INSERT INTO resolution (fdid, content_key, encoding_key) VALUES (?1, ?2, ?3)")
         .map_err(|e| format!("prepare resolution insert: {e}"))?;
+    let mut inserted_rows = 0usize;
 
-    let mut n: usize = 0;
-    for (fdid, ck) in &fdid_to_ck {
-        if let Some(ek) = ck_to_ek.get(ck) {
-            insert
-                .execute((fdid, ck.as_bytes().as_ref(), ek.as_bytes().as_ref()))
-                .map_err(|e| format!("insert resolution entry {fdid}: {e}"))?;
-            n += 1;
-        }
+    for (&fdid, content_key) in fdid_to_ck {
+        let Some(encoding_key) = ck_to_ek.get(content_key) else {
+            continue;
+        };
+        insert
+            .execute((
+                fdid,
+                content_key.as_bytes().as_ref(),
+                encoding_key.as_bytes().as_ref(),
+            ))
+            .map_err(|e| format!("insert resolution entry {fdid}: {e}"))?;
+        inserted_rows += 1;
     }
 
     drop(insert);
+    Ok(inserted_rows)
+}
 
+fn insert_resolution_metadata(
+    conn: &Connection,
+    root_mtime: i64,
+    enc_mtime: i64,
+) -> Result<(), String> {
     conn.execute(
         "INSERT INTO metadata (root_mtime, enc_mtime, schema_version) VALUES (?1, ?2, ?3)",
         (root_mtime, enc_mtime, SCHEMA_VERSION),
     )
     .map_err(|e| format!("insert resolution metadata: {e}"))?;
-
-    conn.execute_batch("COMMIT;")
-        .map_err(|e| format!("commit resolution cache: {e}"))?;
-
-    let elapsed = t0.elapsed().as_secs_f64();
-    eprintln!("Built CASC resolution cache ({n} entries) in {elapsed:.1}s");
-
     Ok(())
+}
+
+fn commit_resolution_cache(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch("COMMIT;")
+        .map_err(|e| format!("commit resolution cache: {e}"))
+}
+
+fn log_resolution_cache_build(inserted_rows: usize, started_at: Instant) {
+    let elapsed = started_at.elapsed().as_secs_f64();
+    eprintln!("Built CASC resolution cache ({inserted_rows} entries) in {elapsed:.1}s");
 }
 
 fn file_mtime(path: &Path) -> Result<i64, String> {
