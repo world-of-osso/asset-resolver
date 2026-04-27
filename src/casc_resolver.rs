@@ -1,9 +1,10 @@
 //! Internal CASC-backed extractor for the disk asset cache.
 //!
-//! Reads directly from the local WoW installation at [`WOW_DATA_PATH`].
-//! On first use, parses `.build.info` and the build config to find root/encoding
-//! keys, loads cached resolution files, and lazily initializes archive indices
-//! only when an actual FDID extraction is needed.
+//! Reads directly from a local WoW installation discovered via
+//! [`wow_install_path`]. On first use, parses `.build.info` and the build
+//! config to find root/encoding keys, loads cached resolution files, and
+//! lazily initializes archive indices only when an actual FDID extraction is
+//! needed.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -18,11 +19,79 @@ use cascette_crypto::TactKeyStore;
 use cascette_formats::blte::BlteFile;
 use tokio::runtime::Handle as TokioHandle;
 
-const WOW_DATA_PATH: &str = "/syncthing/World of Warcraft/Data";
 const LOCAL_CASC_HEADER_SIZE: usize = 30;
 const EXTERNAL_TACT_KEYS_PATH: &str = "tactkeys/WoW.txt";
 
 static CASC: OnceLock<Option<CascState>> = OnceLock::new();
+static WOW_INSTALL_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// Returns the discovered WoW install root (the directory that contains
+/// `Data/`, `_retail_/`, etc.), or `None` if no install was found.
+///
+/// Discovery order:
+/// 1. `WOW_INSTALL_PATH` env var (install root containing `Data/`)
+/// 2. `WOW_DATA_PATH` env var (full path to the `Data/` dir; parent is the root)
+/// 3. A built-in list of common locations (Linux/Wine/Lutris/WSL/macOS).
+///
+/// A candidate is accepted only if `<root>/Data/data` exists (the directory
+/// holding `.idx`/archive blobs), to avoid matching a non-WoW directory.
+pub fn wow_install_path() -> Option<&'static Path> {
+    WOW_INSTALL_PATH
+        .get_or_init(discover_wow_install_path)
+        .as_deref()
+}
+
+/// Returns the discovered `Data/` directory inside the WoW install, or
+/// `None` if no install was found.
+pub fn wow_data_path() -> Option<PathBuf> {
+    wow_install_path().map(|root| root.join("Data"))
+}
+
+fn discover_wow_install_path() -> Option<PathBuf> {
+    if let Ok(install) = std::env::var("WOW_INSTALL_PATH") {
+        let root = PathBuf::from(install);
+        if is_valid_wow_install(&root) {
+            return Some(root);
+        }
+    }
+    if let Ok(data) = std::env::var("WOW_DATA_PATH") {
+        let data_path = PathBuf::from(data);
+        if let Some(root) = data_path.parent() {
+            if is_valid_wow_install(root) {
+                return Some(root.to_path_buf());
+            }
+        }
+    }
+    for candidate in candidate_install_paths() {
+        if is_valid_wow_install(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn is_valid_wow_install(root: &Path) -> bool {
+    root.join("Data").join("data").is_dir()
+}
+
+fn candidate_install_paths() -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = vec![
+        PathBuf::from("/syncthing/World of Warcraft"),
+        PathBuf::from("/mnt/c/Program Files (x86)/World of Warcraft"),
+        PathBuf::from("/mnt/c/World of Warcraft"),
+        PathBuf::from("/Applications/World of Warcraft"),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        candidates.extend([
+            home.join("Games/world-of-warcraft/drive_c/Program Files (x86)/World of Warcraft"),
+            home.join(".wine/drive_c/Program Files (x86)/World of Warcraft"),
+            home.join(".wine/drive_c/World of Warcraft"),
+            home.join(".local/share/lutris/runners/wine/World of Warcraft"),
+        ]);
+    }
+    candidates
+}
 
 struct CascState {
     install: Installation,
@@ -130,7 +199,10 @@ impl CascState {
             LocalAccessState::Uninitialized => {}
         }
 
-        let data_dir = PathBuf::from(WOW_DATA_PATH).join("data");
+        let data_dir = match wow_install_path() {
+            Some(root) => root.join("Data").join("data"),
+            None => return Err("WoW install not found for local archive access".to_string()),
+        };
         let mut indices = IndexManager::new(&data_dir);
         let mut archives = ArchiveManager::new(&data_dir);
         let keys = load_tact_keys();
@@ -263,17 +335,20 @@ fn get_casc() -> Result<&'static CascState, String> {
 }
 
 fn init_casc() -> Result<CascState, String> {
-    let data_root = PathBuf::from(WOW_DATA_PATH);
+    let install_root = wow_install_path()
+        .ok_or_else(|| "WoW install not found (set WOW_INSTALL_PATH or WOW_DATA_PATH, or place install at one of the default locations)".to_string())?;
+    let data_root = install_root.join("Data");
     if !data_root.exists() {
         return Err(format!("WoW data not found at {}", data_root.display()));
     }
 
+    let data_root_display = data_root.display().to_string();
     let install = Installation::open(data_root).map_err(|e| format!("CASC open: {e}"))?;
 
     let casc_dir = crate::paths::shared_data_path("casc");
     let cache = CascResolutionCache::open(&casc_dir)?;
 
-    eprintln!("CASC resolver initialized from {WOW_DATA_PATH}");
+    eprintln!("CASC resolver initialized from {data_root_display}");
     Ok(CascState {
         install,
         cache,
