@@ -51,5 +51,7 @@ impl CascListfileResolver {
 }
 
 #[cfg(feature = "casc")]
-pub use casc_resolver::{ensure_file_cached_at_path, resolve_bytes, wow_data_path, wow_install_path};
+pub use casc_resolver::{
+    ensure_file_cached_at_path, resolve_bytes, wow_data_path, wow_install_path,
+};
 pub use listfile::{CachedListfile, Listfile, lookup_fdid, lookup_path};
