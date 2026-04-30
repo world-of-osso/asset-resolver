@@ -16,6 +16,6 @@ casc = [
 binrw = "0.15.1"
 rusqlite = { version = "0.35", features = ["bundled"] }
 tokio = { version = "1", features = ["rt"] }
-cascette-client-storage = { git = "https://github.com/wowemulation-dev/cascette-rs", rev = "2d1294b", features = ["local-install"], optional = true }
-cascette-crypto = { git = "https://github.com/wowemulation-dev/cascette-rs", rev = "2d1294b", optional = true }
-cascette-formats = { git = "https://github.com/wowemulation-dev/cascette-rs", rev = "2d1294b", optional = true }
+cascette-client-storage = { git = "https://github.com/Osso/cascette-rs", rev = "2fe7118", features = ["local-install"], optional = true }
+cascette-crypto = { git = "https://github.com/Osso/cascette-rs", rev = "2fe7118", optional = true }
+cascette-formats = { git = "https://github.com/Osso/cascette-rs", rev = "2fe7118", optional = true }
