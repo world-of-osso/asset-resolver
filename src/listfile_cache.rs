@@ -13,6 +13,30 @@ pub fn cache_path() -> PathBuf {
     crate::paths::shared_data_path(COMMUNITY_LISTFILE_CACHE_PATH)
 }
 
+pub struct CommunityCache {
+    conn: Connection,
+}
+
+impl CommunityCache {
+    pub fn open(cache_path: &Path, source_path: &Path) -> Result<Self, String> {
+        let cache_path = ensure_cache(cache_path, source_path)?;
+        let conn = Connection::open_with_flags(
+            &cache_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|err| format!("open {}: {err}", cache_path.display()))?;
+        Ok(Self { conn })
+    }
+
+    pub fn lookup_fdid(&self, fdid: u32) -> Result<Option<String>, String> {
+        query_fdid(&self.conn, fdid)
+    }
+
+    pub fn lookup_path(&self, path: &str) -> Result<Option<(u32, String)>, String> {
+        query_path(&self.conn, path)
+    }
+}
+
 pub fn load_local_cache(cache_path: &Path) -> Result<CachedListfile, String> {
     if !cache_path.exists() {
         return Ok(CachedListfile::default());
@@ -120,12 +144,18 @@ pub fn lookup_fdid(
     source_path: &Path,
     fdid: u32,
 ) -> Result<Option<String>, String> {
-    let cache_path = ensure_cache(cache_path, source_path)?;
-    let conn = Connection::open_with_flags(
-        &cache_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|err| format!("open {}: {err}", cache_path.display()))?;
+    CommunityCache::open(cache_path, source_path)?.lookup_fdid(fdid)
+}
+
+pub fn lookup_path(
+    cache_path: &Path,
+    source_path: &Path,
+    path: &str,
+) -> Result<Option<(u32, String)>, String> {
+    CommunityCache::open(cache_path, source_path)?.lookup_path(path)
+}
+
+fn query_fdid(conn: &Connection, fdid: u32) -> Result<Option<String>, String> {
     conn.query_row(
         "SELECT path FROM listfile_entries WHERE fdid = ?1",
         [fdid],
@@ -138,17 +168,7 @@ pub fn lookup_fdid(
     })
 }
 
-pub fn lookup_path(
-    cache_path: &Path,
-    source_path: &Path,
-    path: &str,
-) -> Result<Option<(u32, String)>, String> {
-    let cache_path = ensure_cache(cache_path, source_path)?;
-    let conn = Connection::open_with_flags(
-        &cache_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|err| format!("open {}: {err}", cache_path.display()))?;
+fn query_path(conn: &Connection, path: &str) -> Result<Option<(u32, String)>, String> {
     let normalized = path.to_ascii_lowercase();
     conn.query_row(
         "SELECT fdid, path FROM listfile_entries WHERE lower_path = ?1",
