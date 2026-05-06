@@ -150,6 +150,9 @@ impl Listfile {
     }
 
     fn log_community_error_once(&self, err: &str) {
+        if err.starts_with("missing ") {
+            return;
+        }
         let mut logged = self.community_error_logged.lock().unwrap();
         if *logged {
             return;
