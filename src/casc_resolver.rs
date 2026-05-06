@@ -81,6 +81,13 @@ fn candidate_install_paths() -> Vec<PathBuf> {
         PathBuf::from("/mnt/c/World of Warcraft"),
         PathBuf::from("/Applications/World of Warcraft"),
     ];
+    if cfg!(windows) {
+        candidates.extend([
+            PathBuf::from(r"C:\World of Warcraft"),
+            PathBuf::from(r"C:\Program Files (x86)\World of Warcraft"),
+            PathBuf::from(r"C:\Program Files\World of Warcraft"),
+        ]);
+    }
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
         candidates.extend([
