@@ -197,10 +197,30 @@ fn ensure_cache(cache_path: &Path, source_path: &Path) -> Result<PathBuf, String
     }
     let conn = Connection::open(cache_path)
         .map_err(|err| format!("open {}: {err}", cache_path.display()))?;
+    if !source_path.exists() {
+        if cache_has_entries(&conn)? {
+            return Ok(cache_path.to_path_buf());
+        }
+        return Err(format!("missing {}", source_path.display()));
+    }
     if !cache_is_fresh(&conn, source_path)? {
         rebuild_cache(&conn, source_path)?;
     }
     Ok(cache_path.to_path_buf())
+}
+
+fn cache_has_entries(conn: &Connection) -> Result<bool, String> {
+    conn.query_row("SELECT 1 FROM listfile_entries LIMIT 1", [], |_| Ok(()))
+        .map(|()| true)
+        .or_else(|err| match err {
+            rusqlite::Error::QueryReturnedNoRows => Ok(false),
+            rusqlite::Error::SqliteFailure(_, Some(message))
+                if message.contains("no such table") =>
+            {
+                Ok(false)
+            }
+            _ => Err(format!("query listfile_entries availability: {err}")),
+        })
 }
 
 fn cache_is_fresh(conn: &Connection, source_path: &Path) -> Result<bool, String> {

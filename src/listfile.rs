@@ -17,6 +17,7 @@ pub struct Listfile {
     community_cache_path: PathBuf,
     local_cache_path: PathBuf,
     community_cache: Mutex<Option<listfile_cache::CommunityCache>>,
+    community_error_logged: Mutex<bool>,
     pub local: Mutex<CachedListfile>,
 }
 
@@ -56,6 +57,7 @@ impl Listfile {
             community_cache_path,
             local_cache_path,
             community_cache: Mutex::new(None),
+            community_error_logged: Mutex::new(false),
             local: Mutex::new(local),
         }
     }
@@ -79,7 +81,7 @@ impl Listfile {
         let path = match self.with_community_cache(|cache| cache.lookup_fdid(fdid)) {
             Ok(path) => path?,
             Err(err) => {
-                eprintln!("Failed listfile fdid lookup {fdid}: {err}");
+                self.log_community_error_once(&err);
                 return None;
             }
         };
@@ -99,7 +101,7 @@ impl Listfile {
         match self.with_community_cache(|cache| cache.lookup_path(path)) {
             Ok(row) => row,
             Err(err) => {
-                eprintln!("Failed listfile path lookup `{path}`: {err}");
+                self.log_community_error_once(&err);
                 None
             }
         }
@@ -145,5 +147,14 @@ impl Listfile {
         local.by_fdid.entry(fdid).or_insert(path);
         local.by_path.entry(normalized).or_insert(fdid);
         false
+    }
+
+    fn log_community_error_once(&self, err: &str) {
+        let mut logged = self.community_error_logged.lock().unwrap();
+        if *logged {
+            return;
+        }
+        *logged = true;
+        eprintln!("Community listfile unavailable; using local listfile cache only: {err}");
     }
 }
