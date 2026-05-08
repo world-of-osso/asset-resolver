@@ -29,7 +29,7 @@ pub fn shared_data_root() -> PathBuf {
     if let Some(path) = std::env::var_os("GAME_ENGINE_SHARED_DATA_DIR") {
         PathBuf::from(path)
     } else {
-        shared_repo_root().join("data")
+        default_shared_data_root()
     }
 }
 
@@ -58,7 +58,10 @@ pub fn remap_to_shared_data_path(path: &Path) -> PathBuf {
 }
 
 fn default_source_data_root() -> PathBuf {
-    default_repo_root().join("data")
+    runtime_data_candidates()
+        .into_iter()
+        .find(|path| path.exists())
+        .unwrap_or_else(|| PathBuf::from("data"))
 }
 
 fn default_repo_root() -> PathBuf {
@@ -72,4 +75,34 @@ fn default_repo_root() -> PathBuf {
     } else {
         manifest_root
     }
+}
+
+fn default_shared_data_root() -> PathBuf {
+    let repo_data = shared_repo_root().join("data");
+    if repo_data.exists() {
+        return repo_data;
+    }
+    default_cache_root().join("asset-resolver/data")
+}
+
+fn runtime_data_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("data"));
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(parent) = exe.parent()
+    {
+        candidates.push(parent.join("data"));
+    }
+    candidates.push(default_repo_root().join("data"));
+    candidates
+}
+
+fn default_cache_root() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("XDG_CACHE_HOME"))
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache").into()))
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
 }
