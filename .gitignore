@@ -1,5 +1,6 @@
 target/
 Cargo.lock
+PLAN.md
 
 # Local maintenance-only full wowdev listfiles. Runtime should use the curated
 # restricted listfile; keep the huge full files local and untracked.
