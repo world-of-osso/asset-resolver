@@ -10,13 +10,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use binrw::BinRead;
-use cascette_client_storage::Installation;
+use cascette_client_storage::{BuildInfoFile, Installation};
 use cascette_client_storage::index::IndexManager;
 use cascette_client_storage::storage::ArchiveManager;
 
 use crate::casc_cache::CascResolutionCache;
-use cascette_crypto::TactKeyStore;
+use cascette_crypto::{ContentKey, EncodingKey, TactKeyStore};
 use cascette_formats::blte::BlteFile;
+use cascette_formats::config::BuildConfig;
+use cascette_formats::encoding::EncodingFile;
 use tokio::runtime::Handle as TokioHandle;
 
 const LOCAL_CASC_HEADER_SIZE: usize = 30;
@@ -353,6 +355,7 @@ fn init_casc() -> Result<CascState, String> {
     let install = Installation::open(data_root).map_err(|e| format!("CASC open: {e}"))?;
 
     let casc_dir = crate::paths::shared_data_path("casc");
+    ensure_resolution_cache(install_root, &install, &casc_dir)?;
     let cache = CascResolutionCache::open(&casc_dir)?;
 
     eprintln!("CASC resolver initialized from {data_root_display}");
@@ -362,6 +365,117 @@ fn init_casc() -> Result<CascState, String> {
         initialized: Mutex::new(InitState::Uninitialized),
         local_access: Mutex::new(LocalAccessState::Uninitialized),
     })
+}
+
+fn ensure_resolution_cache(
+    install_root: &Path,
+    install: &Installation,
+    casc_dir: &Path,
+) -> Result<(), String> {
+    if CascResolutionCache::open(casc_dir).is_ok() {
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(casc_dir)
+        .map_err(|e| format!("create CASC cache dir {}: {e}", casc_dir.display()))?;
+    run_async(install.initialize()).map_err(|e| format!("CASC init for cache bootstrap: {e}"))?;
+
+    let build_config = read_active_build_config(install_root)?;
+    let encoding_info = build_config
+        .encoding()
+        .ok_or_else(|| "active WoW build config has no encoding entry".to_string())?;
+    let encoding_key = encoding_info
+        .encoding_key
+        .as_deref()
+        .ok_or_else(|| "active WoW build config encoding entry has no encoding key".to_string())
+        .and_then(parse_encoding_key)?;
+    let encoding_data = run_async(install.read_file_by_encoding_key(&encoding_key))
+        .map_err(|e| format!("read encoding file {encoding_key}: {e}"))?;
+    std::fs::write(casc_dir.join("encoding.bin"), &encoding_data)
+        .map_err(|e| format!("write {}: {e}", casc_dir.join("encoding.bin").display()))?;
+
+    let root_content_key = build_config
+        .root()
+        .ok_or_else(|| "active WoW build config has no root entry".to_string())
+        .and_then(parse_content_key)?;
+    let root_encoding_key = resolve_content_key_from_encoding(&encoding_data, &root_content_key)?;
+    let root_data = run_async(install.read_file_by_encoding_key(&root_encoding_key))
+        .map_err(|e| format!("read root file {root_encoding_key}: {e}"))?;
+    std::fs::write(casc_dir.join("root.bin"), &root_data)
+        .map_err(|e| format!("write {}: {e}", casc_dir.join("root.bin").display()))?;
+
+    crate::casc_cache::build_resolution_cache(casc_dir)
+}
+
+fn read_active_build_config(install_root: &Path) -> Result<BuildConfig, String> {
+    let build_info_path = install_root.join(".build.info");
+    let build_info = std::fs::read_to_string(&build_info_path)
+        .map_err(|e| format!("read {}: {e}", build_info_path.display()))?;
+    let build_info = BuildInfoFile::parse_str(&build_info)
+        .map_err(|e| format!("parse {}: {e}", build_info_path.display()))?;
+    let entry = build_info
+        .entries()
+        .into_iter()
+        .find(|entry| entry.is_active() && entry.product() == Some("wow"))
+        .or_else(|| build_info.active_entry())
+        .ok_or_else(|| format!("{} has no active build entry", build_info_path.display()))?;
+    let build_key = entry
+        .build_key()
+        .ok_or_else(|| "active WoW build entry has no build key".to_string())?;
+    let build_config_path = data_config_path(install_root, build_key)?;
+    let build_config = std::fs::File::open(&build_config_path)
+        .map_err(|e| format!("open {}: {e}", build_config_path.display()))?;
+    BuildConfig::parse(build_config)
+        .map_err(|e| format!("parse {}: {e}", build_config_path.display()))
+}
+
+fn data_config_path(install_root: &Path, key: &str) -> Result<PathBuf, String> {
+    if key.len() < 4 {
+        return Err(format!("invalid build config key: {key}"));
+    }
+    Ok(install_root
+        .join("Data/config")
+        .join(&key[0..2])
+        .join(&key[2..4])
+        .join(key))
+}
+
+fn resolve_content_key_from_encoding(
+    encoding_data: &[u8],
+    content_key: &ContentKey,
+) -> Result<EncodingKey, String> {
+    let encoding =
+        EncodingFile::parse(encoding_data).map_err(|e| format!("parse encoding.bin: {e}"))?;
+    for page in &encoding.ckey_pages {
+        for entry in &page.entries {
+            if &entry.content_key == content_key
+                && let Some(encoding_key) = entry.encoding_keys.first()
+            {
+                return Ok(*encoding_key);
+            }
+        }
+    }
+    Err(format!("encoding.bin does not map root content key {content_key}"))
+}
+
+fn parse_content_key(value: &str) -> Result<ContentKey, String> {
+    parse_hex_16(value).map(ContentKey::from_bytes)
+}
+
+fn parse_encoding_key(value: &str) -> Result<EncodingKey, String> {
+    parse_hex_16(value).map(EncodingKey::from_bytes)
+}
+
+fn parse_hex_16(value: &str) -> Result<[u8; 16], String> {
+    if value.len() != 32 {
+        return Err(format!("expected 32 hex characters, got {value}"));
+    }
+    let mut out = [0u8; 16];
+    for i in 0..16 {
+        out[i] = u8::from_str_radix(&value[i * 2..i * 2 + 2], 16)
+            .map_err(|e| format!("invalid hex key {value}: {e}"))?;
+    }
+    Ok(out)
 }
 
 fn load_tact_keys() -> TactKeyStore {
