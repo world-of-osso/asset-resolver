@@ -426,7 +426,7 @@ fn ensure_resolution_cache(
     install: &Installation,
     casc_dir: &Path,
 ) -> Result<(), String> {
-    if CascResolutionCache::open(casc_dir).is_ok() {
+    if crate::casc_cache::resolution_cache_is_fresh(casc_dir)? {
         return Ok(());
     }
 

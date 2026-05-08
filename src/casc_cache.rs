@@ -80,6 +80,17 @@ impl CascResolutionCache {
     }
 }
 
+pub fn resolution_cache_is_fresh(casc_dir: &Path) -> Result<bool, String> {
+    let (cache_path, root_path, enc_path) = resolution_paths(casc_dir);
+    if !cache_path.exists() {
+        return Ok(false);
+    }
+
+    let root_mtime = file_mtime(&root_path)?;
+    let enc_mtime = file_mtime(&enc_path)?;
+    cache_is_fresh(&cache_path, root_mtime, enc_mtime)
+}
+
 /// Build (or rebuild) the resolution SQLite cache from root.bin + encoding.bin.
 ///
 /// Called by `casc_refresh` after writing the binary files.
