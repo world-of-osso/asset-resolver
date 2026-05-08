@@ -6,9 +6,10 @@ use std::time::{Instant, UNIX_EPOCH};
 use cascette_crypto::{ContentKey, EncodingKey};
 use rusqlite::{Connection, OpenFlags};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 type FdidToContentKeyMap = HashMap<u32, ContentKey>;
 type ContentToEncodingKeyMap = HashMap<ContentKey, EncodingKey>;
+type TvfsResolutionMap = HashMap<u32, (ContentKey, EncodingKey)>;
 
 pub struct CascResolutionCache {
     conn: Mutex<Connection>,
@@ -20,9 +21,7 @@ impl CascResolutionCache {
     /// Returns an error if the cache doesn't exist or is stale relative to
     /// root.bin / encoding.bin. Run [`build_resolution_cache`] first (via `casc_refresh`).
     pub fn open(casc_dir: &Path) -> Result<Self, String> {
-        let cache_path = casc_dir.join("resolution.sqlite");
-        let root_path = casc_dir.join("root.bin");
-        let enc_path = casc_dir.join("encoding.bin");
+        let (cache_path, root_path, enc_path, vfs_path) = resolution_paths(casc_dir);
 
         if !cache_path.exists() {
             return Err(format!(
@@ -33,8 +32,9 @@ impl CascResolutionCache {
 
         let root_mtime = file_mtime(&root_path)?;
         let enc_mtime = file_mtime(&enc_path)?;
+        let vfs_mtime = optional_file_mtime(&vfs_path)?;
 
-        if !cache_is_fresh(&cache_path, root_mtime, enc_mtime)? {
+        if !cache_is_fresh(&cache_path, root_mtime, enc_mtime, vfs_mtime)? {
             return Err(format!(
                 "{} is stale (run `casc_refresh` to rebuild it)",
                 cache_path.display()
@@ -43,7 +43,7 @@ impl CascResolutionCache {
 
         let conn = Connection::open_with_flags(
             &cache_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(|e| format!("open {}: {e}", cache_path.display()))?;
 
@@ -78,49 +78,89 @@ impl CascResolutionCache {
                 Some((ck, ek))
             })
     }
+
+    /// Persist FDID resolutions discovered lazily from TVFS manifests.
+    pub fn remember_resolutions(&self, resolutions: &TvfsResolutionMap) -> Result<usize, String> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("begin TVFS resolution transaction: {e}"))?;
+        let mut insert = tx
+            .prepare(
+                "INSERT OR REPLACE INTO resolution (fdid, content_key, encoding_key) VALUES (?1, ?2, ?3)",
+            )
+            .map_err(|e| format!("prepare TVFS resolution cache insert: {e}"))?;
+        let mut inserted = 0usize;
+        for (&fdid, (content_key, encoding_key)) in resolutions {
+            insert
+                .execute((
+                    fdid,
+                    content_key.as_bytes().as_ref(),
+                    encoding_key.as_bytes().as_ref(),
+                ))
+                .map_err(|e| format!("cache TVFS resolution entry {fdid}: {e}"))?;
+            inserted += 1;
+        }
+        drop(insert);
+        tx.commit()
+            .map_err(|e| format!("commit TVFS resolution cache: {e}"))?;
+        Ok(inserted)
+    }
 }
 
 pub fn resolution_cache_is_fresh(casc_dir: &Path) -> Result<bool, String> {
-    let (cache_path, root_path, enc_path) = resolution_paths(casc_dir);
+    let (cache_path, root_path, enc_path, vfs_path) = resolution_paths(casc_dir);
     if !cache_path.exists() {
         return Ok(false);
     }
 
     let root_mtime = file_mtime(&root_path)?;
     let enc_mtime = file_mtime(&enc_path)?;
-    cache_is_fresh(&cache_path, root_mtime, enc_mtime)
+    let vfs_mtime = optional_file_mtime(&vfs_path)?;
+    cache_is_fresh(&cache_path, root_mtime, enc_mtime, vfs_mtime)
 }
 
 /// Build (or rebuild) the resolution SQLite cache from root.bin + encoding.bin.
 ///
 /// Called by `casc_refresh` after writing the binary files.
 pub fn build_resolution_cache(casc_dir: &Path) -> Result<(), String> {
-    let (cache_path, root_path, enc_path) = resolution_paths(casc_dir);
+    let (cache_path, root_path, enc_path, vfs_path) = resolution_paths(casc_dir);
     let root_mtime = file_mtime(&root_path)?;
     let enc_mtime = file_mtime(&enc_path)?;
+    let vfs_mtime = optional_file_mtime(&vfs_path)?;
     let started_at = Instant::now();
-    let (fdid_to_ck, ck_to_ek) = build_resolution_maps(&root_path, &enc_path)?;
+    let (fdid_to_ck, ck_to_ek, tvfs_resolutions) =
+        build_resolution_maps(&root_path, &enc_path, &vfs_path)?;
     let conn = open_resolution_cache(&cache_path)?;
     init_resolution_schema(&conn)?;
-    let inserted_rows = insert_resolution_rows(&conn, &fdid_to_ck, &ck_to_ek)?;
-    insert_resolution_metadata(&conn, root_mtime, enc_mtime)?;
+    let inserted_rows = insert_resolution_rows(&conn, &fdid_to_ck, &ck_to_ek, &tvfs_resolutions)?;
+    insert_resolution_metadata(&conn, root_mtime, enc_mtime, vfs_mtime)?;
     commit_resolution_cache(&conn)?;
     log_resolution_cache_build(inserted_rows, started_at);
     Ok(())
 }
 
-fn resolution_paths(casc_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+fn resolution_paths(casc_dir: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
     (
         casc_dir.join("resolution.sqlite"),
         casc_dir.join("root.bin"),
         casc_dir.join("encoding.bin"),
+        casc_dir.join("vfs-root.bin"),
     )
 }
 
 fn build_resolution_maps(
     root_path: &Path,
     enc_path: &Path,
-) -> Result<(FdidToContentKeyMap, ContentToEncodingKeyMap), String> {
+    vfs_path: &Path,
+) -> Result<
+    (
+        FdidToContentKeyMap,
+        ContentToEncodingKeyMap,
+        TvfsResolutionMap,
+    ),
+    String,
+> {
     let root_data = read_cache_file(root_path)?;
     let enc_data = read_cache_file(enc_path)?;
     let root = cascette_formats::root::RootFile::parse(&root_data)
@@ -129,7 +169,14 @@ fn build_resolution_maps(
         .map_err(|e| format!("parse encoding.bin: {e}"))?;
     let fdid_to_ck = collect_fdid_to_content_keys(&root);
     let ck_to_ek = collect_content_to_encoding_keys(&encoding);
-    Ok((fdid_to_ck, ck_to_ek))
+    let tvfs_resolutions = if vfs_path.exists() {
+        let vfs_data = read_cache_file(vfs_path)?;
+        crate::tvfs_cache::collect_wow_tvfs_resolutions(&vfs_data)
+            .map_err(|e| format!("parse vfs-root.bin: {e}"))?
+    } else {
+        HashMap::new()
+    };
+    Ok((fdid_to_ck, ck_to_ek, tvfs_resolutions))
 }
 
 fn read_cache_file(path: &Path) -> Result<Vec<u8>, String> {
@@ -174,6 +221,7 @@ fn init_resolution_schema(conn: &Connection) -> Result<(), String> {
          CREATE TABLE metadata (
              root_mtime INTEGER NOT NULL,
              enc_mtime INTEGER NOT NULL,
+             vfs_mtime INTEGER NOT NULL,
              schema_version INTEGER NOT NULL
          );
          CREATE TABLE resolution (
@@ -189,6 +237,7 @@ fn insert_resolution_rows(
     conn: &Connection,
     fdid_to_ck: &FdidToContentKeyMap,
     ck_to_ek: &ContentToEncodingKeyMap,
+    tvfs_resolutions: &TvfsResolutionMap,
 ) -> Result<usize, String> {
     let mut insert = conn
         .prepare("INSERT INTO resolution (fdid, content_key, encoding_key) VALUES (?1, ?2, ?3)")
@@ -209,7 +258,22 @@ fn insert_resolution_rows(
         inserted_rows += 1;
     }
 
+    let mut insert_tvfs = conn
+        .prepare("INSERT OR REPLACE INTO resolution (fdid, content_key, encoding_key) VALUES (?1, ?2, ?3)")
+        .map_err(|e| format!("prepare TVFS resolution insert: {e}"))?;
+    for (&fdid, (content_key, encoding_key)) in tvfs_resolutions {
+        insert_tvfs
+            .execute((
+                fdid,
+                content_key.as_bytes().as_ref(),
+                encoding_key.as_bytes().as_ref(),
+            ))
+            .map_err(|e| format!("insert TVFS resolution entry {fdid}: {e}"))?;
+        inserted_rows += 1;
+    }
+
     drop(insert);
+    drop(insert_tvfs);
     Ok(inserted_rows)
 }
 
@@ -217,10 +281,11 @@ fn insert_resolution_metadata(
     conn: &Connection,
     root_mtime: i64,
     enc_mtime: i64,
+    vfs_mtime: i64,
 ) -> Result<(), String> {
     conn.execute(
-        "INSERT INTO metadata (root_mtime, enc_mtime, schema_version) VALUES (?1, ?2, ?3)",
-        (root_mtime, enc_mtime, SCHEMA_VERSION),
+        "INSERT INTO metadata (root_mtime, enc_mtime, vfs_mtime, schema_version) VALUES (?1, ?2, ?3, ?4)",
+        (root_mtime, enc_mtime, vfs_mtime, SCHEMA_VERSION),
     )
     .map_err(|e| format!("insert resolution metadata: {e}"))?;
     Ok(())
@@ -247,7 +312,20 @@ fn file_mtime(path: &Path) -> Result<i64, String> {
         .as_secs() as i64)
 }
 
-fn cache_is_fresh(cache_path: &Path, root_mtime: i64, enc_mtime: i64) -> Result<bool, String> {
+fn optional_file_mtime(path: &Path) -> Result<i64, String> {
+    if path.exists() {
+        file_mtime(path)
+    } else {
+        Ok(0)
+    }
+}
+
+fn cache_is_fresh(
+    cache_path: &Path,
+    root_mtime: i64,
+    enc_mtime: i64,
+    vfs_mtime: i64,
+) -> Result<bool, String> {
     let conn = Connection::open_with_flags(
         cache_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -255,7 +333,7 @@ fn cache_is_fresh(cache_path: &Path, root_mtime: i64, enc_mtime: i64) -> Result<
     .map_err(|e| format!("open {}: {e}", cache_path.display()))?;
 
     let mut stmt = match conn
-        .prepare("SELECT root_mtime, enc_mtime, schema_version FROM metadata LIMIT 1")
+        .prepare("SELECT root_mtime, enc_mtime, vfs_mtime, schema_version FROM metadata LIMIT 1")
     {
         Ok(stmt) => stmt,
         Err(rusqlite::Error::SqliteFailure(_, Some(ref msg))) if msg.contains("no such table") => {
@@ -269,12 +347,14 @@ fn cache_is_fresh(cache_path: &Path, root_mtime: i64, enc_mtime: i64) -> Result<
             row.get::<_, i64>(0)?,
             row.get::<_, i64>(1)?,
             row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
         ))
     });
 
     match row {
-        Ok((stored_root, stored_enc, stored_version)) => Ok(stored_root == root_mtime
+        Ok((stored_root, stored_enc, stored_vfs, stored_version)) => Ok(stored_root == root_mtime
             && stored_enc == enc_mtime
+            && stored_vfs == vfs_mtime
             && stored_version == SCHEMA_VERSION),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
         Err(e) => Err(format!("query metadata: {e}")),

@@ -6,6 +6,7 @@
 //! lazily initializes archive indices only when an actual FDID extraction is
 //! needed.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -108,6 +109,8 @@ struct CascState {
     cache: CascResolutionCache,
     initialized: Mutex<InitState>,
     local_access: Mutex<LocalAccessState>,
+    vfs_manifest_keys: Vec<EncodingKey>,
+    tvfs: Mutex<TvfsResolutionState>,
 }
 
 enum InitState {
@@ -126,6 +129,12 @@ struct LocalArchiveAccess {
     indices: IndexManager,
     archives: ArchiveManager,
     keys: TactKeyStore,
+}
+
+#[derive(Default)]
+struct TvfsResolutionState {
+    scanned_keys: usize,
+    by_fdid: HashMap<u32, [u8; 16]>,
 }
 
 struct ActiveBuild {
@@ -327,7 +336,10 @@ fn read_fdid_bytes(casc: &CascState, fdid: u32) -> Result<Vec<u8>, String> {
         Some((_, encoding_key_bytes)) => {
             read_fdid_bytes_by_encoding_key(casc, fdid, encoding_key_bytes)
         }
-        None => read_fdid_bytes_by_listfile_path(casc, fdid),
+        None => read_fdid_bytes_by_tvfs(casc, fdid).or_else(|tvfs_err| {
+            read_fdid_bytes_by_listfile_path(casc, fdid)
+                .map_err(|path_err| format!("{tvfs_err}; {path_err}"))
+        }),
     }
 }
 
@@ -347,6 +359,46 @@ fn read_fdid_bytes_by_listfile_path(casc: &CascState, fdid: u32) -> Result<Vec<u
     })?;
     casc.read_file_by_path(path)
         .map_err(|e| format!("CASC read FDID {fdid} via listfile path {path}: {e}"))
+}
+
+fn read_fdid_bytes_by_tvfs(casc: &CascState, fdid: u32) -> Result<Vec<u8>, String> {
+    let encoding_key_bytes = resolve_fdid_from_tvfs(casc, fdid)?;
+    read_fdid_bytes_by_encoding_key(casc, fdid, encoding_key_bytes)
+}
+
+fn resolve_fdid_from_tvfs(casc: &CascState, fdid: u32) -> Result<[u8; 16], String> {
+    let mut tvfs = casc.tvfs.lock().unwrap();
+    if let Some(encoding_key) = tvfs.by_fdid.get(&fdid).copied() {
+        return Ok(encoding_key);
+    }
+
+    while tvfs.scanned_keys < casc.vfs_manifest_keys.len() {
+        let manifest_index = tvfs.scanned_keys;
+        tvfs.scanned_keys += 1;
+        let manifest_key = casc.vfs_manifest_keys[manifest_index];
+        drop(tvfs);
+
+        let data = casc
+            .read_file_by_encoding_key(&manifest_key)
+            .map_err(|e| format!("read TVFS manifest {manifest_key}: {e}"))?;
+        let resolutions = crate::tvfs_cache::collect_wow_tvfs_resolutions(&data)
+            .map_err(|e| format!("parse TVFS manifest {manifest_key}: {e}"))?;
+        if let Err(err) = casc.cache.remember_resolutions(&resolutions) {
+            eprintln!("CASC: failed to persist TVFS resolutions from {manifest_key}: {err}");
+        }
+
+        tvfs = casc.tvfs.lock().unwrap();
+        for (manifest_fdid, (_, encoding_key)) in resolutions {
+            tvfs.by_fdid.insert(manifest_fdid, *encoding_key.as_bytes());
+        }
+        if let Some(encoding_key) = tvfs.by_fdid.get(&fdid).copied() {
+            return Ok(encoding_key);
+        }
+    }
+
+    Err(format!(
+        "CASC resolve FDID {fdid}: missing resolution and TVFS entry"
+    ))
 }
 
 fn write_to_path(out_path: &Path, data: &[u8]) -> Result<(), String> {
@@ -390,6 +442,8 @@ fn init_casc() -> Result<CascState, String> {
         cache,
         initialized: Mutex::new(InitState::Uninitialized),
         local_access: Mutex::new(LocalAccessState::Uninitialized),
+        vfs_manifest_keys: vfs_manifest_keys(&active_build.config),
+        tvfs: Mutex::new(TvfsResolutionState::default()),
     })
 }
 
@@ -468,6 +522,22 @@ fn rebuild_resolution_cache(
         .map_err(|e| format!("read root file {root_encoding_key}: {e}"))?;
     std::fs::write(casc_dir.join("root.bin"), &root_data)
         .map_err(|e| format!("write {}: {e}", casc_dir.join("root.bin").display()))?;
+
+    let vfs_root_path = casc_dir.join("vfs-root.bin");
+    if let Some(vfs_root) = build_config.vfs_root() {
+        let vfs_root_content_key = parse_content_key(&vfs_root.content_key)?;
+        let vfs_root_encoding_key = match vfs_root.encoding_key.as_deref() {
+            Some(encoding_key) => parse_encoding_key(encoding_key)?,
+            None => resolve_content_key_from_encoding(&encoding_data, &vfs_root_content_key)?,
+        };
+        let vfs_root_data = read_refresh_file_by_encoding_key(install, &vfs_root_encoding_key)
+            .map_err(|e| format!("read vfs-root file {vfs_root_encoding_key}: {e}"))?;
+        std::fs::write(&vfs_root_path, &vfs_root_data)
+            .map_err(|e| format!("write {}: {e}", vfs_root_path.display()))?;
+    } else if vfs_root_path.exists() {
+        std::fs::remove_file(&vfs_root_path)
+            .map_err(|e| format!("remove stale {}: {e}", vfs_root_path.display()))?;
+    }
 
     crate::casc_cache::build_resolution_cache(casc_dir)
 }
@@ -599,6 +669,19 @@ fn parse_content_key(value: &str) -> Result<ContentKey, String> {
 
 fn parse_encoding_key(value: &str) -> Result<EncodingKey, String> {
     parse_hex_16(value).map(EncodingKey::from_bytes)
+}
+
+fn vfs_manifest_keys(build_config: &BuildConfig) -> Vec<EncodingKey> {
+    build_config
+        .vfs_entries()
+        .into_iter()
+        .filter_map(|(_, entry)| {
+            entry
+                .encoding_key
+                .as_deref()
+                .and_then(|key| parse_encoding_key(key).ok())
+        })
+        .collect()
 }
 
 fn parse_hex_16(value: &str) -> Result<[u8; 16], String> {

@@ -9,6 +9,9 @@ pub mod casc_cache;
 #[cfg(feature = "casc")]
 pub mod casc_resolver;
 
+#[cfg(feature = "casc")]
+pub mod tvfs_cache;
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CascListfileResolver;
 
