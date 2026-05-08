@@ -41,6 +41,11 @@ pub fn load_local_cache(cache_path: &Path) -> Result<CachedListfile, String> {
     if !cache_path.exists() {
         return Ok(CachedListfile::default());
     }
+    let rows = read_local_cache_rows(cache_path)?;
+    Ok(build_cached_listfile(rows))
+}
+
+fn read_local_cache_rows(cache_path: &Path) -> Result<Vec<(u32, String)>, String> {
     let conn = Connection::open_with_flags(
         cache_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -52,7 +57,7 @@ pub fn load_local_cache(cache_path: &Path) -> Result<CachedListfile, String> {
         Err(rusqlite::Error::SqliteFailure(_, Some(message)))
             if message.contains("no such table") =>
         {
-            return Ok(CachedListfile::default());
+            return Ok(Vec::new());
         }
         Err(err) => return Err(format!("prepare local_listfile_entries query: {err}")),
     };
@@ -61,15 +66,27 @@ pub fn load_local_cache(cache_path: &Path) -> Result<CachedListfile, String> {
             Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
         })
         .map_err(|err| format!("query local_listfile_entries: {err}"))?;
-    let mut by_fdid = HashMap::new();
-    let mut by_path = HashMap::new();
+    let mut cached_rows = Vec::new();
     for row in rows {
         let (fdid, path) = row.map_err(|err| format!("read local_listfile_entries row: {err}"))?;
-        let leaked = Box::leak(path.into_boxed_str()) as &'static str;
+        cached_rows.push((fdid, path));
+    }
+    Ok(cached_rows)
+}
+
+fn build_cached_listfile(rows: Vec<(u32, String)>) -> CachedListfile {
+    let mut by_fdid = HashMap::new();
+    let mut by_path = HashMap::new();
+    for (fdid, path) in rows {
+        let leaked = leak_listfile_path(path);
         by_fdid.insert(fdid, leaked);
         by_path.insert(leaked.to_ascii_lowercase(), fdid);
     }
-    Ok(CachedListfile { by_fdid, by_path })
+    CachedListfile { by_fdid, by_path }
+}
+
+fn leak_listfile_path(path: String) -> &'static str {
+    Box::leak(path.into_boxed_str()) as &'static str
 }
 
 pub fn remember_local_cache_entry(cache_path: &Path, fdid: u32, path: &str) -> Result<(), String> {

@@ -32,11 +32,25 @@ pub fn lookup_path(path: &str) -> Option<u32> {
 fn get() -> &'static Listfile {
     LISTFILE.get_or_init(|| {
         Listfile::new(
-            crate::paths::resolve_data_path("community-listfile.csv"),
+            community_listfile_path(),
             listfile_cache::cache_path(),
             crate::paths::shared_data_path("local-listfile-cache.sqlite"),
         )
     })
+}
+
+fn community_listfile_path() -> PathBuf {
+    let community_path = crate::paths::resolve_data_path("community-listfile.csv");
+    if community_path.exists() {
+        return community_path;
+    }
+
+    let limited_path = crate::paths::resolve_data_path("wow-ui-sim-listfile.csv");
+    if limited_path.exists() {
+        return limited_path;
+    }
+
+    community_path
 }
 
 impl Listfile {
@@ -85,16 +99,19 @@ impl Listfile {
                 return None;
             }
         };
-        let leaked = Box::leak(path.into_boxed_str()) as &'static str;
-        self.remember(fdid, leaked);
-        Some(leaked)
+        Some(self.cache_path_for_fdid(fdid, path))
     }
 
     fn lookup_community_path(&self, path: &str) -> Option<u32> {
         let (fdid, resolved_path) = self.resolve_community_path(path)?;
-        let leaked = Box::leak(resolved_path.into_boxed_str()) as &'static str;
-        self.remember(fdid, leaked);
+        self.cache_path_for_fdid(fdid, resolved_path);
         Some(fdid)
+    }
+
+    fn cache_path_for_fdid(&self, fdid: u32, path: String) -> &'static str {
+        let leaked = Box::leak(path.into_boxed_str()) as &'static str;
+        self.remember(fdid, leaked);
+        leaked
     }
 
     fn resolve_community_path(&self, path: &str) -> Option<(u32, String)> {

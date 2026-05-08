@@ -47,6 +47,17 @@ pub fn shared_data_path(relative: impl AsRef<Path>) -> PathBuf {
     shared_data_root().join(relative)
 }
 
+pub fn cache_root() -> PathBuf {
+    if let Some(path) = std::env::var_os("ASSET_RESOLVER_CACHE_DIR") {
+        return PathBuf::from(path);
+    }
+    default_cache_root().join("asset-resolver")
+}
+
+pub fn casc_cache_path(product: &str, build_key: &str) -> PathBuf {
+    cache_root().join("casc").join(product).join(build_key)
+}
+
 pub fn remap_to_shared_data_path(path: &Path) -> PathBuf {
     if let Ok(stripped) = path.strip_prefix(source_data_root()) {
         return shared_data_path(stripped);

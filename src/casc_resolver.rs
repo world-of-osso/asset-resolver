@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use binrw::BinRead;
-use cascette_client_storage::{BuildInfoFile, Installation};
 use cascette_client_storage::index::IndexManager;
 use cascette_client_storage::storage::ArchiveManager;
+use cascette_client_storage::{BuildInfoFile, Installation};
 
 use crate::casc_cache::CascResolutionCache;
 use cascette_crypto::{ContentKey, EncodingKey, TactKeyStore};
@@ -23,6 +23,7 @@ use tokio::runtime::Handle as TokioHandle;
 
 const LOCAL_CASC_HEADER_SIZE: usize = 30;
 const EXTERNAL_TACT_KEYS_PATH: &str = "tactkeys/WoW.txt";
+const DEFAULT_WOW_PRODUCT: &str = "wow";
 
 static CASC: OnceLock<Option<CascState>> = OnceLock::new();
 static WOW_INSTALL_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -127,6 +128,12 @@ struct LocalArchiveAccess {
     keys: TactKeyStore,
 }
 
+struct ActiveBuild {
+    product: String,
+    build_key: String,
+    config: BuildConfig,
+}
+
 impl CascState {
     fn ensure_initialized(&self) -> Result<(), String> {
         let mut init = self.initialized.lock().unwrap();
@@ -161,6 +168,11 @@ impl CascState {
                     )
                 }),
         }
+    }
+
+    fn read_file_by_path(&self, path: &str) -> Result<Vec<u8>, String> {
+        run_async(self.install.read_file_by_path(path))
+            .map_err(|err| format!("read CASC path {path}: {err}"))
     }
 
     fn read_file_by_encoding_key_with_keys(
@@ -291,41 +303,50 @@ pub fn resolve_bytes(fdid: u32) -> Option<Vec<u8>> {
         return None;
     }
 
-    let (_, encoding_key_bytes) = match casc.cache.resolve_fdid(fdid) {
-        Some(keys) => keys,
-        None => {
-            eprintln!("asset-cache byte resolve failed: fdid {fdid}: missing resolution entry");
-            return None;
-        }
-    };
-    let encoding_key = cascette_crypto::EncodingKey::from_bytes(encoding_key_bytes);
-    match casc.read_file_by_encoding_key(&encoding_key) {
+    match read_fdid_bytes(casc, fdid) {
         Ok(data) => Some(data),
         Err(err) => {
-            eprintln!(
-                "asset-cache byte resolve failed: fdid {fdid} via encoding key {encoding_key}: {err}"
-            );
+            eprintln!("asset-cache byte resolve failed: fdid {fdid}: {err}");
             None
         }
     }
 }
 
-fn extract_fdid_to_path(fdid: u32, out_path: &Path) -> Result<PathBuf, String> {
+pub fn extract_fdid_to_path(fdid: u32, out_path: &Path) -> Result<PathBuf, String> {
     let casc = get_casc()?;
     casc.ensure_initialized()?;
 
-    let (_, encoding_key_bytes) = casc
-        .cache
-        .resolve_fdid(fdid)
-        .ok_or_else(|| format!("CASC resolve FDID {fdid}: missing resolution entry"))?;
-    let encoding_key = cascette_crypto::EncodingKey::from_bytes(encoding_key_bytes);
-    let data = casc
-        .read_file_by_encoding_key(&encoding_key)
-        .map_err(|e| format!("CASC read FDID {fdid} via encoding key {encoding_key}: {e}"))?;
-
+    let data = read_fdid_bytes(casc, fdid)?;
     write_to_path(out_path, &data)?;
     eprintln!("CASC: extracted FDID {fdid} -> {}", out_path.display());
     Ok(out_path.to_path_buf())
+}
+
+fn read_fdid_bytes(casc: &CascState, fdid: u32) -> Result<Vec<u8>, String> {
+    match casc.cache.resolve_fdid(fdid) {
+        Some((_, encoding_key_bytes)) => {
+            read_fdid_bytes_by_encoding_key(casc, fdid, encoding_key_bytes)
+        }
+        None => read_fdid_bytes_by_listfile_path(casc, fdid),
+    }
+}
+
+fn read_fdid_bytes_by_encoding_key(
+    casc: &CascState,
+    fdid: u32,
+    encoding_key_bytes: [u8; 16],
+) -> Result<Vec<u8>, String> {
+    let encoding_key = cascette_crypto::EncodingKey::from_bytes(encoding_key_bytes);
+    casc.read_file_by_encoding_key(&encoding_key)
+        .map_err(|e| format!("CASC read FDID {fdid} via encoding key {encoding_key}: {e}"))
+}
+
+fn read_fdid_bytes_by_listfile_path(casc: &CascState, fdid: u32) -> Result<Vec<u8>, String> {
+    let path = crate::lookup_fdid(fdid).ok_or_else(|| {
+        format!("CASC resolve FDID {fdid}: missing resolution and listfile entry")
+    })?;
+    casc.read_file_by_path(path)
+        .map_err(|e| format!("CASC read FDID {fdid} via listfile path {path}: {e}"))
 }
 
 fn write_to_path(out_path: &Path, data: &[u8]) -> Result<(), String> {
@@ -354,17 +375,50 @@ fn init_casc() -> Result<CascState, String> {
     let data_root_display = data_root.display().to_string();
     let install = Installation::open(data_root).map_err(|e| format!("CASC open: {e}"))?;
 
-    let casc_dir = crate::paths::shared_data_path("casc");
+    let active_build = read_active_build(install_root)?;
+    let casc_dir = crate::paths::casc_cache_path(&active_build.product, &active_build.build_key);
     ensure_resolution_cache(install_root, &install, &casc_dir)?;
     let cache = CascResolutionCache::open(&casc_dir)?;
 
-    eprintln!("CASC resolver initialized from {data_root_display}");
+    eprintln!(
+        "CASC resolver initialized from {data_root_display} using {} cache {}",
+        active_build.product,
+        casc_dir.display()
+    );
     Ok(CascState {
         install,
         cache,
         initialized: Mutex::new(InitState::Uninitialized),
         local_access: Mutex::new(LocalAccessState::Uninitialized),
     })
+}
+
+pub fn casc_cache_dir_for_install(install_root: &Path) -> Result<PathBuf, String> {
+    let active_build = read_active_build(install_root)?;
+    Ok(crate::paths::casc_cache_path(
+        &active_build.product,
+        &active_build.build_key,
+    ))
+}
+
+pub fn open_resolution_cache_for_install(
+    install_root: &Path,
+) -> Result<CascResolutionCache, String> {
+    let data_root = install_root.join("Data");
+    let install = Installation::open(data_root).map_err(|e| format!("CASC open: {e}"))?;
+    let active_build = read_active_build(install_root)?;
+    let casc_dir = crate::paths::casc_cache_path(&active_build.product, &active_build.build_key);
+    ensure_resolution_cache(install_root, &install, &casc_dir)?;
+    CascResolutionCache::open(&casc_dir)
+}
+
+pub fn refresh_resolution_cache_for_install(install_root: &Path) -> Result<PathBuf, String> {
+    let data_root = install_root.join("Data");
+    let install = Installation::open(data_root).map_err(|e| format!("CASC open: {e}"))?;
+    let active_build = read_active_build(install_root)?;
+    let casc_dir = crate::paths::casc_cache_path(&active_build.product, &active_build.build_key);
+    rebuild_resolution_cache(&install, &casc_dir, &active_build.config)?;
+    Ok(casc_dir)
 }
 
 fn ensure_resolution_cache(
@@ -380,7 +434,18 @@ fn ensure_resolution_cache(
         .map_err(|e| format!("create CASC cache dir {}: {e}", casc_dir.display()))?;
     run_async(install.initialize()).map_err(|e| format!("CASC init for cache bootstrap: {e}"))?;
 
-    let build_config = read_active_build_config(install_root)?;
+    let active_build = read_active_build(install_root)?;
+    rebuild_resolution_cache(install, casc_dir, &active_build.config)
+}
+
+fn rebuild_resolution_cache(
+    install: &Installation,
+    casc_dir: &Path,
+    build_config: &BuildConfig,
+) -> Result<(), String> {
+    std::fs::create_dir_all(casc_dir)
+        .map_err(|e| format!("create CASC cache dir {}: {e}", casc_dir.display()))?;
+
     let encoding_info = build_config
         .encoding()
         .ok_or_else(|| "active WoW build config has no encoding entry".to_string())?;
@@ -389,7 +454,7 @@ fn ensure_resolution_cache(
         .as_deref()
         .ok_or_else(|| "active WoW build config encoding entry has no encoding key".to_string())
         .and_then(parse_encoding_key)?;
-    let encoding_data = run_async(install.read_file_by_encoding_key(&encoding_key))
+    let encoding_data = read_refresh_file_by_encoding_key(install, &encoding_key)
         .map_err(|e| format!("read encoding file {encoding_key}: {e}"))?;
     std::fs::write(casc_dir.join("encoding.bin"), &encoding_data)
         .map_err(|e| format!("write {}: {e}", casc_dir.join("encoding.bin").display()))?;
@@ -399,7 +464,7 @@ fn ensure_resolution_cache(
         .ok_or_else(|| "active WoW build config has no root entry".to_string())
         .and_then(parse_content_key)?;
     let root_encoding_key = resolve_content_key_from_encoding(&encoding_data, &root_content_key)?;
-    let root_data = run_async(install.read_file_by_encoding_key(&root_encoding_key))
+    let root_data = read_refresh_file_by_encoding_key(install, &root_encoding_key)
         .map_err(|e| format!("read root file {root_encoding_key}: {e}"))?;
     std::fs::write(casc_dir.join("root.bin"), &root_data)
         .map_err(|e| format!("write {}: {e}", casc_dir.join("root.bin").display()))?;
@@ -407,26 +472,94 @@ fn ensure_resolution_cache(
     crate::casc_cache::build_resolution_cache(casc_dir)
 }
 
-fn read_active_build_config(install_root: &Path) -> Result<BuildConfig, String> {
+fn read_refresh_file_by_encoding_key(
+    install: &Installation,
+    encoding_key: &EncodingKey,
+) -> Result<Vec<u8>, String> {
+    match run_async(install.read_file_by_encoding_key(encoding_key)) {
+        Ok(data) => Ok(data),
+        Err(primary_err) => {
+            read_refresh_file_by_local_archive(encoding_key).map_err(|fallback_err| {
+                format!(
+                    "{primary_err}; key-aware local archive fallback also failed: {fallback_err}"
+                )
+            })
+        }
+    }
+}
+
+fn read_refresh_file_by_local_archive(encoding_key: &EncodingKey) -> Result<Vec<u8>, String> {
+    let data_dir = wow_install_path()
+        .ok_or_else(|| "WoW install not found for local archive access".to_string())?
+        .join("Data")
+        .join("data");
+    let mut indices = IndexManager::new(&data_dir);
+    let mut archives = ArchiveManager::new(&data_dir);
+    let keys = load_tact_keys();
+    run_async(indices.load_all()).map_err(|e| format!("load CASC indices: {e}"))?;
+    run_async(archives.open_all()).map_err(|e| format!("open CASC archives: {e}"))?;
+
+    let index_entry = indices
+        .lookup(encoding_key)
+        .ok_or_else(|| format!("missing archive location for encoding key {encoding_key}"))?;
+    let raw_blte = archives
+        .read_raw(
+            index_entry.archive_id(),
+            index_entry.archive_offset(),
+            index_entry.size,
+        )
+        .map_err(|e| format!("read raw BLTE archive entry: {e}"))?;
+    let blte_bytes = if raw_blte.len() >= LOCAL_CASC_HEADER_SIZE + 4
+        && &raw_blte[LOCAL_CASC_HEADER_SIZE..LOCAL_CASC_HEADER_SIZE + 4] == b"BLTE"
+    {
+        &raw_blte[LOCAL_CASC_HEADER_SIZE..]
+    } else {
+        raw_blte.as_slice()
+    };
+    let blte = BlteFile::read_options(
+        &mut std::io::Cursor::new(blte_bytes),
+        binrw::Endian::Big,
+        (),
+    )
+    .map_err(|e| format!("parse BLTE container: {e}"))?;
+    blte.decompress_with_keys(&keys)
+        .map_err(|e| format!("decrypt/decompress BLTE container: {e}"))
+}
+
+fn read_active_build(install_root: &Path) -> Result<ActiveBuild, String> {
     let build_info_path = install_root.join(".build.info");
     let build_info = std::fs::read_to_string(&build_info_path)
         .map_err(|e| format!("read {}: {e}", build_info_path.display()))?;
     let build_info = BuildInfoFile::parse_str(&build_info)
         .map_err(|e| format!("parse {}: {e}", build_info_path.display()))?;
+    let selected_product = selected_wow_product();
     let entry = build_info
         .entries()
         .into_iter()
-        .find(|entry| entry.is_active() && entry.product() == Some("wow"))
+        .find(|entry| entry.is_active() && entry.product() == Some(selected_product.as_str()))
         .or_else(|| build_info.active_entry())
         .ok_or_else(|| format!("{} has no active build entry", build_info_path.display()))?;
+    let product = entry
+        .product()
+        .unwrap_or(selected_product.as_str())
+        .to_string();
     let build_key = entry
         .build_key()
         .ok_or_else(|| "active WoW build entry has no build key".to_string())?;
     let build_config_path = data_config_path(install_root, build_key)?;
     let build_config = std::fs::File::open(&build_config_path)
         .map_err(|e| format!("open {}: {e}", build_config_path.display()))?;
-    BuildConfig::parse(build_config)
-        .map_err(|e| format!("parse {}: {e}", build_config_path.display()))
+    let config = BuildConfig::parse(build_config)
+        .map_err(|e| format!("parse {}: {e}", build_config_path.display()))?;
+    Ok(ActiveBuild {
+        product,
+        build_key: build_key.to_string(),
+        config,
+    })
+}
+
+fn selected_wow_product() -> String {
+    std::env::var("WOW_PRODUCT").unwrap_or_else(|_| DEFAULT_WOW_PRODUCT.to_string())
 }
 
 fn data_config_path(install_root: &Path, key: &str) -> Result<PathBuf, String> {
@@ -455,7 +588,9 @@ fn resolve_content_key_from_encoding(
             }
         }
     }
-    Err(format!("encoding.bin does not map root content key {content_key}"))
+    Err(format!(
+        "encoding.bin does not map root content key {content_key}"
+    ))
 }
 
 fn parse_content_key(value: &str) -> Result<ContentKey, String> {

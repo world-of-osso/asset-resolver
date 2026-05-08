@@ -19,3 +19,13 @@ tokio = { version = "1", features = ["rt"] }
 cascette-client-storage = { git = "https://github.com/Osso/cascette-rs", rev = "0d0e79abfc32b9d8fe712971a78f6a9b9a0cae4d", features = ["local-install"], optional = true }
 cascette-crypto = { git = "https://github.com/Osso/cascette-rs", rev = "0d0e79abfc32b9d8fe712971a78f6a9b9a0cae4d", optional = true }
 cascette-formats = { git = "https://github.com/Osso/cascette-rs", rev = "0d0e79abfc32b9d8fe712971a78f6a9b9a0cae4d", optional = true }
+
+[[bin]]
+name = "casc-local"
+path = "src/bin/casc_local.rs"
+required-features = ["casc"]
+
+[[bin]]
+name = "casc_refresh"
+path = "src/bin/casc_refresh.rs"
+required-features = ["casc"]
