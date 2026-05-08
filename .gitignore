@@ -1,2 +1,7 @@
 target/
 Cargo.lock
+
+# Local maintenance-only full wowdev listfiles. Runtime should use the curated
+# restricted listfile; keep the huge full files local and untracked.
+data/full-community-listfile*.csv
+data/community-listfile-full*.csv
