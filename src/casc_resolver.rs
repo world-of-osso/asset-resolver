@@ -85,11 +85,18 @@ fn candidate_install_paths() -> Vec<PathBuf> {
         PathBuf::from("/Applications/World of Warcraft"),
     ];
     if cfg!(windows) {
-        candidates.extend([
-            PathBuf::from(r"C:\World of Warcraft"),
-            PathBuf::from(r"C:\Program Files (x86)\World of Warcraft"),
-            PathBuf::from(r"C:\Program Files\World of Warcraft"),
-        ]);
+        // Cover the common drive letters users put games on. C: is the
+        // default Windows install drive; D:-G: are typical secondary
+        // drives. We don't enumerate the whole alphabet because the
+        // network/removable drives would be probed too.
+        for letter in ['C', 'D', 'E', 'F', 'G'] {
+            let drive = format!("{letter}:\\");
+            candidates.extend([
+                PathBuf::from(format!("{drive}World of Warcraft")),
+                PathBuf::from(format!("{drive}Program Files (x86)\\World of Warcraft")),
+                PathBuf::from(format!("{drive}Program Files\\World of Warcraft")),
+            ]);
+        }
     }
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
