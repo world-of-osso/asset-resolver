@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::time::{Instant, UNIX_EPOCH};
 
 use cascette_crypto::{ContentKey, EncodingKey};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, ErrorCode, OpenFlags};
 
 const SCHEMA_VERSION: i64 = 1;
 type FdidToContentKeyMap = HashMap<u32, ContentKey>;
@@ -108,10 +108,7 @@ pub fn resolution_cache_is_fresh(casc_dir: &Path) -> Result<bool, String> {
         Ok(m) => m,
         Err(_) => return Ok(false),
     };
-    // Cache_is_fresh may also error out (locked DB, schema mismatch, etc).
-    // Treat any failure as "needs rebuild" rather than fatal so a partially
-    // corrupted cache doesn't render the simulator unusable.
-    Ok(cache_is_fresh(&cache_path, root_mtime, enc_mtime).unwrap_or(false))
+    cache_is_fresh(&cache_path, root_mtime, enc_mtime)
 }
 
 /// Build (or rebuild) the resolution SQLite cache from root.bin + encoding.bin.
@@ -290,6 +287,9 @@ fn cache_is_fresh(cache_path: &Path, root_mtime: i64, enc_mtime: i64) -> Result<
         Err(rusqlite::Error::SqliteFailure(_, Some(ref msg))) if msg.contains("no such table") => {
             return Ok(false);
         }
+        Err(rusqlite::Error::SqliteFailure(ref err, _)) if is_corrupt_cache_error(err.code) => {
+            return Ok(false);
+        }
         Err(e) => return Err(format!("prepare metadata query: {e}")),
     };
 
@@ -306,23 +306,108 @@ fn cache_is_fresh(cache_path: &Path, root_mtime: i64, enc_mtime: i64) -> Result<
             && stored_enc == enc_mtime
             && stored_version == SCHEMA_VERSION),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(rusqlite::Error::SqliteFailure(ref err, _)) if is_corrupt_cache_error(err.code) => {
+            Ok(false)
+        }
         Err(e) => Err(format!("query metadata: {e}")),
     }
+}
+
+fn is_corrupt_cache_error(code: ErrorCode) -> bool {
+    matches!(code, ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::SystemTime;
+
+    fn unique_temp_casc_dir() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "asset-resolver-casc-cache-test-{}-{unique}",
+            std::process::id()
+        ))
+    }
+
+    fn create_temp_casc_dir() -> PathBuf {
+        let casc_dir = unique_temp_casc_dir();
+        std::fs::create_dir_all(&casc_dir).expect("create temp casc dir");
+        std::fs::write(casc_dir.join("root.bin"), b"root").expect("write root.bin");
+        std::fs::write(casc_dir.join("encoding.bin"), b"encoding").expect("write encoding.bin");
+        casc_dir
+    }
 
     #[test]
     fn open_and_lookup() {
-        let casc_dir = crate::paths::shared_data_path("casc");
+        let casc_dir = create_temp_casc_dir();
+        let cache_path = casc_dir.join("resolution.sqlite");
+        let conn = Connection::open(&cache_path).expect("create cache database");
+        let content_key = [1u8; 16];
+        let encoding_key = [2u8; 16];
+
+        init_resolution_schema(&conn).expect("create resolution schema");
+        conn.execute(
+            "INSERT INTO resolution (fdid, content_key, encoding_key) VALUES (?1, ?2, ?3)",
+            (120191u32, content_key.as_slice(), encoding_key.as_slice()),
+        )
+        .expect("insert resolution row");
+        insert_resolution_metadata(
+            &conn,
+            file_mtime(&casc_dir.join("root.bin")).expect("root mtime"),
+            file_mtime(&casc_dir.join("encoding.bin")).expect("encoding mtime"),
+        )
+        .expect("insert metadata row");
+        commit_resolution_cache(&conn).expect("commit cache database");
+        drop(conn);
+
         let cache = CascResolutionCache::open(&casc_dir).expect("failed to open cache");
-        // 120191 is a well-known BLP texture FDID
         let result = cache.resolve_fdid(120191);
+
+        std::fs::remove_dir_all(&casc_dir).expect("remove temp casc dir");
         assert!(result.is_some(), "expected fdid 120191 to resolve");
         let (ck, ek) = result.unwrap();
-        assert_ne!(ck, [0u8; 16], "content key should not be zero");
-        assert_ne!(ek, [0u8; 16], "encoding key should not be zero");
+        assert_eq!(ck, content_key);
+        assert_eq!(ek, encoding_key);
+    }
+
+    #[test]
+    fn resolution_cache_is_fresh_errors_when_cache_cannot_be_opened() {
+        let casc_dir = create_temp_casc_dir();
+        std::fs::create_dir(casc_dir.join("resolution.sqlite"))
+            .expect("create directory at cache path");
+
+        let result = resolution_cache_is_fresh(&casc_dir);
+
+        std::fs::remove_dir_all(&casc_dir).expect("remove temp casc dir");
+        assert!(result.is_err(), "expected open failure, got {result:?}");
+    }
+
+    #[test]
+    fn resolution_cache_is_fresh_returns_false_without_metadata_table() {
+        let casc_dir = create_temp_casc_dir();
+        Connection::open(casc_dir.join("resolution.sqlite")).expect("create empty cache database");
+
+        let result = resolution_cache_is_fresh(&casc_dir);
+
+        std::fs::remove_dir_all(&casc_dir).expect("remove temp casc dir");
+        assert_eq!(result, Ok(false));
+    }
+
+    #[test]
+    fn resolution_cache_is_fresh_returns_false_without_metadata_row() {
+        let casc_dir = create_temp_casc_dir();
+        let conn =
+            Connection::open(casc_dir.join("resolution.sqlite")).expect("create cache database");
+        init_resolution_schema(&conn).expect("create resolution schema");
+        commit_resolution_cache(&conn).expect("commit cache database");
+
+        let result = resolution_cache_is_fresh(&casc_dir);
+
+        std::fs::remove_dir_all(&casc_dir).expect("remove temp casc dir");
+        assert_eq!(result, Ok(false));
     }
 }
