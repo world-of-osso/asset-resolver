@@ -366,9 +366,19 @@ fn write_to_path(out_path: &Path, data: &[u8]) -> Result<(), String> {
 }
 
 fn get_casc() -> Result<&'static CascState, String> {
-    CASC.get_or_init(|| init_casc().ok())
-        .as_ref()
-        .ok_or_else(|| "CASC not available".to_string())
+    CASC.get_or_init(|| match init_casc() {
+        Ok(state) => Some(state),
+        Err(err) => {
+            // Surface init failures instead of swallowing them silently;
+            // every later caller would otherwise just see "CASC not available"
+            // with no clue why bootstrap failed (missing manifest, bad cache,
+            // permission error, etc).
+            eprintln!("CASC init failed: {err}");
+            None
+        }
+    })
+    .as_ref()
+    .ok_or_else(|| "CASC not available".to_string())
 }
 
 fn init_casc() -> Result<CascState, String> {

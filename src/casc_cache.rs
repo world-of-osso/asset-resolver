@@ -86,9 +86,32 @@ pub fn resolution_cache_is_fresh(casc_dir: &Path) -> Result<bool, String> {
         return Ok(false);
     }
 
-    let root_mtime = file_mtime(&root_path)?;
-    let enc_mtime = file_mtime(&enc_path)?;
-    cache_is_fresh(&cache_path, root_mtime, enc_mtime)
+    // If a previous bootstrap was killed mid-write, SQLite leaves a rollback
+    // journal alongside the .sqlite file. Read-only opens then fail with
+    // "attempt to write a readonly database" because SQLite needs to recover
+    // the journal. Wipe the half-written cache so the caller rebuilds from
+    // CASC instead of erroring out forever.
+    let journal_path = cache_path.with_extension("sqlite-journal");
+    let wal_path = cache_path.with_extension("sqlite-wal");
+    if journal_path.exists() || wal_path.exists() {
+        let _ = std::fs::remove_file(&cache_path);
+        let _ = std::fs::remove_file(&journal_path);
+        let _ = std::fs::remove_file(&wal_path);
+        return Ok(false);
+    }
+
+    let root_mtime = match file_mtime(&root_path) {
+        Ok(m) => m,
+        Err(_) => return Ok(false),
+    };
+    let enc_mtime = match file_mtime(&enc_path) {
+        Ok(m) => m,
+        Err(_) => return Ok(false),
+    };
+    // Cache_is_fresh may also error out (locked DB, schema mismatch, etc).
+    // Treat any failure as "needs rebuild" rather than fatal so a partially
+    // corrupted cache doesn't render the simulator unusable.
+    Ok(cache_is_fresh(&cache_path, root_mtime, enc_mtime).unwrap_or(false))
 }
 
 /// Build (or rebuild) the resolution SQLite cache from root.bin + encoding.bin.
@@ -96,13 +119,19 @@ pub fn resolution_cache_is_fresh(casc_dir: &Path) -> Result<bool, String> {
 /// Called by `casc_refresh` after writing the binary files.
 pub fn build_resolution_cache(casc_dir: &Path) -> Result<(), String> {
     let (cache_path, root_path, enc_path) = resolution_paths(casc_dir);
-    let root_mtime = file_mtime(&root_path)?;
-    let enc_mtime = file_mtime(&enc_path)?;
     let started_at = Instant::now();
     let (fdid_to_ck, ck_to_ek) = build_resolution_maps(&root_path, &enc_path)?;
     let conn = open_resolution_cache(&cache_path)?;
     init_resolution_schema(&conn)?;
     let inserted_rows = insert_resolution_rows(&conn, &fdid_to_ck, &ck_to_ek)?;
+    // Capture mtimes AFTER the parse/insert. Some upstream code (notably
+    // cascette's lazy index initialization) may rewrite root.bin/encoding.bin
+    // partway through the build, leaving the captured-at-start mtimes stale
+    // by the time the cache is reopened. Reading them post-parse closes the
+    // window and prevents a freshness check from immediately invalidating
+    // the cache we just built.
+    let root_mtime = file_mtime(&root_path)?;
+    let enc_mtime = file_mtime(&enc_path)?;
     insert_resolution_metadata(&conn, root_mtime, enc_mtime)?;
     commit_resolution_cache(&conn)?;
     log_resolution_cache_build(inserted_rows, started_at);
