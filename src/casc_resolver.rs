@@ -15,6 +15,8 @@ use cascette_client_storage::storage::ArchiveManager;
 use cascette_client_storage::{BuildInfoFile, Installation};
 
 use crate::casc_cache::CascResolutionCache;
+use crate::listfile::Listfile;
+use crate::paths::ResolverPaths;
 use cascette_crypto::{ContentKey, EncodingKey, TactKeyStore};
 use cascette_formats::blte::BlteFile;
 use cascette_formats::config::BuildConfig;
@@ -111,6 +113,7 @@ fn candidate_install_paths() -> Vec<PathBuf> {
 }
 
 struct CascState {
+    paths: ResolverPaths,
     install: Installation,
     cache: CascResolutionCache,
     initialized: Mutex<InitState>,
@@ -233,7 +236,7 @@ impl CascState {
         };
         let mut indices = IndexManager::new(&data_dir);
         let mut archives = ArchiveManager::new(&data_dir);
-        let keys = load_tact_keys();
+        let keys = load_tact_keys(&self.paths);
 
         let init_result = (|| -> Result<LocalArchiveAccess, String> {
             run_async(indices.load_all()).map_err(|e| format!("load CASC indices: {e}"))?;
@@ -259,7 +262,21 @@ impl CascState {
 }
 
 pub fn ensure_file_cached_at_path(fdid: u32, out_path: &Path) -> Option<PathBuf> {
-    let shared_path = crate::paths::remap_to_shared_data_path(out_path);
+    ensure_file_cached_at_path_with_paths(
+        crate::paths::default_paths(),
+        crate::listfile::get_default(),
+        fdid,
+        out_path,
+    )
+}
+
+pub(crate) fn ensure_file_cached_at_path_with_paths(
+    paths: &ResolverPaths,
+    listfile: &Listfile,
+    fdid: u32,
+    out_path: &Path,
+) -> Option<PathBuf> {
+    let shared_path = paths.remap_to_shared_data_path(out_path);
     if shared_path.exists() {
         return Some(shared_path);
     }
@@ -277,7 +294,7 @@ pub fn ensure_file_cached_at_path(fdid: u32, out_path: &Path) -> Option<PathBuf>
         "asset-cache miss: fdid {fdid} not cached at {}, extracting from local CASC",
         shared_path.display()
     );
-    match extract_fdid_to_path(fdid, &shared_path) {
+    match extract_fdid_to_path_with_paths(paths, listfile, fdid, &shared_path) {
         Ok(path) => Some(path),
         Err(err) => {
             eprintln!(
@@ -298,7 +315,19 @@ fn write_missing_marker(path: &Path) {
 }
 
 pub fn resolve_bytes(fdid: u32) -> Option<Vec<u8>> {
-    let casc = match get_casc() {
+    resolve_bytes_with_paths(
+        crate::paths::default_paths(),
+        crate::listfile::get_default(),
+        fdid,
+    )
+}
+
+pub(crate) fn resolve_bytes_with_paths(
+    paths: &ResolverPaths,
+    listfile: &Listfile,
+    fdid: u32,
+) -> Option<Vec<u8>> {
+    let casc = match get_casc(paths) {
         Ok(casc) => casc,
         Err(err) => {
             eprintln!("asset-cache byte resolve failed: fdid {fdid}: {err}");
@@ -310,7 +339,7 @@ pub fn resolve_bytes(fdid: u32) -> Option<Vec<u8>> {
         return None;
     }
 
-    match read_fdid_bytes(casc, fdid) {
+    match read_fdid_bytes(casc, listfile, fdid) {
         Ok(data) => Some(data),
         Err(err) => {
             eprintln!("asset-cache byte resolve failed: fdid {fdid}: {err}");
@@ -320,21 +349,35 @@ pub fn resolve_bytes(fdid: u32) -> Option<Vec<u8>> {
 }
 
 pub fn extract_fdid_to_path(fdid: u32, out_path: &Path) -> Result<PathBuf, String> {
-    let casc = get_casc()?;
+    extract_fdid_to_path_with_paths(
+        crate::paths::default_paths(),
+        crate::listfile::get_default(),
+        fdid,
+        out_path,
+    )
+}
+
+fn extract_fdid_to_path_with_paths(
+    paths: &ResolverPaths,
+    listfile: &Listfile,
+    fdid: u32,
+    out_path: &Path,
+) -> Result<PathBuf, String> {
+    let casc = get_casc(paths)?;
     casc.ensure_initialized()?;
 
-    let data = read_fdid_bytes(casc, fdid)?;
+    let data = read_fdid_bytes(casc, listfile, fdid)?;
     write_to_path(out_path, &data)?;
     eprintln!("CASC: extracted FDID {fdid} -> {}", out_path.display());
     Ok(out_path.to_path_buf())
 }
 
-fn read_fdid_bytes(casc: &CascState, fdid: u32) -> Result<Vec<u8>, String> {
+fn read_fdid_bytes(casc: &CascState, listfile: &Listfile, fdid: u32) -> Result<Vec<u8>, String> {
     match casc.cache.resolve_fdid(fdid) {
         Some((_, encoding_key_bytes)) => {
             read_fdid_bytes_by_encoding_key(casc, fdid, encoding_key_bytes)
         }
-        None => read_fdid_bytes_by_listfile_path(casc, fdid),
+        None => read_fdid_bytes_by_listfile_path(casc, listfile, fdid),
     }
 }
 
@@ -348,8 +391,12 @@ fn read_fdid_bytes_by_encoding_key(
         .map_err(|e| format!("CASC read FDID {fdid} via encoding key {encoding_key}: {e}"))
 }
 
-fn read_fdid_bytes_by_listfile_path(casc: &CascState, fdid: u32) -> Result<Vec<u8>, String> {
-    let path = crate::lookup_fdid(fdid).ok_or_else(|| {
+fn read_fdid_bytes_by_listfile_path(
+    casc: &CascState,
+    listfile: &Listfile,
+    fdid: u32,
+) -> Result<Vec<u8>, String> {
+    let path = listfile.lookup_fdid(fdid).ok_or_else(|| {
         format!("CASC resolve FDID {fdid}: missing resolution and listfile entry")
     })?;
     casc.read_file_by_path(path)
@@ -365,8 +412,8 @@ fn write_to_path(out_path: &Path, data: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn get_casc() -> Result<&'static CascState, String> {
-    CASC.get_or_init(|| match init_casc() {
+fn get_casc(paths: &ResolverPaths) -> Result<&'static CascState, String> {
+    CASC.get_or_init(|| match init_casc(paths) {
         Ok(state) => Some(state),
         Err(err) => {
             // Surface init failures instead of swallowing them silently;
@@ -381,7 +428,7 @@ fn get_casc() -> Result<&'static CascState, String> {
     .ok_or_else(|| "CASC not available".to_string())
 }
 
-fn init_casc() -> Result<CascState, String> {
+fn init_casc(paths: &ResolverPaths) -> Result<CascState, String> {
     let install_root = wow_install_path()
         .ok_or_else(|| "WoW install not found (set WOW_INSTALL_PATH or WOW_DATA_PATH, or place install at one of the default locations)".to_string())?;
     let data_root = install_root.join("Data");
@@ -393,8 +440,8 @@ fn init_casc() -> Result<CascState, String> {
     let install = Installation::open(data_root).map_err(|e| format!("CASC open: {e}"))?;
 
     let active_build = read_active_build(install_root)?;
-    let casc_dir = crate::paths::casc_cache_path(&active_build.product, &active_build.build_key);
-    ensure_resolution_cache(install_root, &install, &casc_dir)?;
+    let casc_dir = paths.casc_cache_path(&active_build.product, &active_build.build_key);
+    ensure_resolution_cache(paths, install_root, &install, &casc_dir)?;
     let cache = CascResolutionCache::open(&casc_dir)?;
 
     eprintln!(
@@ -403,6 +450,7 @@ fn init_casc() -> Result<CascState, String> {
         casc_dir.display()
     );
     Ok(CascState {
+        paths: paths.clone(),
         install,
         cache,
         initialized: Mutex::new(InitState::Uninitialized),
@@ -425,7 +473,12 @@ pub fn open_resolution_cache_for_install(
     let install = Installation::open(data_root).map_err(|e| format!("CASC open: {e}"))?;
     let active_build = read_active_build(install_root)?;
     let casc_dir = crate::paths::casc_cache_path(&active_build.product, &active_build.build_key);
-    ensure_resolution_cache(install_root, &install, &casc_dir)?;
+    ensure_resolution_cache(
+        crate::paths::default_paths(),
+        install_root,
+        &install,
+        &casc_dir,
+    )?;
     CascResolutionCache::open(&casc_dir)
 }
 
@@ -434,11 +487,17 @@ pub fn refresh_resolution_cache_for_install(install_root: &Path) -> Result<PathB
     let install = Installation::open(data_root).map_err(|e| format!("CASC open: {e}"))?;
     let active_build = read_active_build(install_root)?;
     let casc_dir = crate::paths::casc_cache_path(&active_build.product, &active_build.build_key);
-    rebuild_resolution_cache(&install, &casc_dir, &active_build.config)?;
+    rebuild_resolution_cache(
+        crate::paths::default_paths(),
+        &install,
+        &casc_dir,
+        &active_build.config,
+    )?;
     Ok(casc_dir)
 }
 
 fn ensure_resolution_cache(
+    paths: &ResolverPaths,
     install_root: &Path,
     install: &Installation,
     casc_dir: &Path,
@@ -452,10 +511,11 @@ fn ensure_resolution_cache(
     run_async(install.initialize()).map_err(|e| format!("CASC init for cache bootstrap: {e}"))?;
 
     let active_build = read_active_build(install_root)?;
-    rebuild_resolution_cache(install, casc_dir, &active_build.config)
+    rebuild_resolution_cache(paths, install, casc_dir, &active_build.config)
 }
 
 fn rebuild_resolution_cache(
+    paths: &ResolverPaths,
     install: &Installation,
     casc_dir: &Path,
     build_config: &BuildConfig,
@@ -471,7 +531,7 @@ fn rebuild_resolution_cache(
         .as_deref()
         .ok_or_else(|| "active WoW build config encoding entry has no encoding key".to_string())
         .and_then(parse_encoding_key)?;
-    let encoding_data = read_refresh_file_by_encoding_key(install, &encoding_key)
+    let encoding_data = read_refresh_file_by_encoding_key(paths, install, &encoding_key)
         .map_err(|e| format!("read encoding file {encoding_key}: {e}"))?;
     std::fs::write(casc_dir.join("encoding.bin"), &encoding_data)
         .map_err(|e| format!("write {}: {e}", casc_dir.join("encoding.bin").display()))?;
@@ -481,7 +541,7 @@ fn rebuild_resolution_cache(
         .ok_or_else(|| "active WoW build config has no root entry".to_string())
         .and_then(parse_content_key)?;
     let root_encoding_key = resolve_content_key_from_encoding(&encoding_data, &root_content_key)?;
-    let root_data = read_refresh_file_by_encoding_key(install, &root_encoding_key)
+    let root_data = read_refresh_file_by_encoding_key(paths, install, &root_encoding_key)
         .map_err(|e| format!("read root file {root_encoding_key}: {e}"))?;
     std::fs::write(casc_dir.join("root.bin"), &root_data)
         .map_err(|e| format!("write {}: {e}", casc_dir.join("root.bin").display()))?;
@@ -490,13 +550,14 @@ fn rebuild_resolution_cache(
 }
 
 fn read_refresh_file_by_encoding_key(
+    paths: &ResolverPaths,
     install: &Installation,
     encoding_key: &EncodingKey,
 ) -> Result<Vec<u8>, String> {
     match run_async(install.read_file_by_encoding_key(encoding_key)) {
         Ok(data) => Ok(data),
         Err(primary_err) => {
-            read_refresh_file_by_local_archive(encoding_key).map_err(|fallback_err| {
+            read_refresh_file_by_local_archive(paths, encoding_key).map_err(|fallback_err| {
                 format!(
                     "{primary_err}; key-aware local archive fallback also failed: {fallback_err}"
                 )
@@ -505,14 +566,17 @@ fn read_refresh_file_by_encoding_key(
     }
 }
 
-fn read_refresh_file_by_local_archive(encoding_key: &EncodingKey) -> Result<Vec<u8>, String> {
+fn read_refresh_file_by_local_archive(
+    paths: &ResolverPaths,
+    encoding_key: &EncodingKey,
+) -> Result<Vec<u8>, String> {
     let data_dir = wow_install_path()
         .ok_or_else(|| "WoW install not found for local archive access".to_string())?
         .join("Data")
         .join("data");
     let mut indices = IndexManager::new(&data_dir);
     let mut archives = ArchiveManager::new(&data_dir);
-    let keys = load_tact_keys();
+    let keys = load_tact_keys(paths);
     run_async(indices.load_all()).map_err(|e| format!("load CASC indices: {e}"))?;
     run_async(archives.open_all()).map_err(|e| format!("open CASC archives: {e}"))?;
 
@@ -630,9 +694,9 @@ fn parse_hex_16(value: &str) -> Result<[u8; 16], String> {
     Ok(out)
 }
 
-fn load_tact_keys() -> TactKeyStore {
+fn load_tact_keys(paths: &ResolverPaths) -> TactKeyStore {
     let mut keys = TactKeyStore::new();
-    let key_path = crate::paths::resolve_data_path(EXTERNAL_TACT_KEYS_PATH);
+    let key_path = paths.resolve_data_path(EXTERNAL_TACT_KEYS_PATH);
     if let Ok(content) = std::fs::read_to_string(&key_path) {
         let loaded = keys.load_from_txt(&content);
         if loaded > 0 {

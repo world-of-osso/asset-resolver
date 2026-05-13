@@ -6,11 +6,12 @@ use std::time::UNIX_EPOCH;
 use rusqlite::{Connection, OpenFlags};
 
 use crate::listfile::CachedListfile;
+use crate::paths::ResolverPaths;
 
 const COMMUNITY_LISTFILE_CACHE_PATH: &str = "community-listfile.sqlite";
 
-pub fn cache_path() -> PathBuf {
-    crate::paths::shared_data_path(COMMUNITY_LISTFILE_CACHE_PATH)
+pub(crate) fn cache_path(paths: &ResolverPaths) -> PathBuf {
+    paths.shared_data_path(COMMUNITY_LISTFILE_CACHE_PATH)
 }
 
 pub struct CommunityCache {
