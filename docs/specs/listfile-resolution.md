@@ -11,6 +11,7 @@ The asset resolver maps WoW FileDataIDs and normalized asset paths through local
 - [x] Resolve paths case-insensitively from the local SQLite cache on an in-memory miss and populate both in-memory indexes.
 - [x] Prefer local SQLite entries over conflicting community listfile entries.
 - [x] Treat a missing local SQLite file or missing local table as an empty local cache.
+- [x] Preserve error behavior: other local SQLite errors are logged once and treated as local misses, allowing community fallback; non-missing community-cache errors are logged once and produce a miss, while missing community sources remain silent misses.
 
 ### Persistence and fallback
 
