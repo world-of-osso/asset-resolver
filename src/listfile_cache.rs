@@ -1,11 +1,9 @@
-use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use rusqlite::{Connection, OpenFlags};
 
-use crate::listfile::CachedListfile;
 use crate::paths::ResolverPaths;
 
 const COMMUNITY_LISTFILE_CACHE_PATH: &str = "community-listfile.sqlite";
@@ -36,58 +34,6 @@ impl CommunityCache {
     pub fn lookup_path(&self, path: &str) -> Result<Option<(u32, String)>, String> {
         query_path(&self.conn, path)
     }
-}
-
-pub fn load_local_cache(cache_path: &Path) -> Result<CachedListfile, String> {
-    if !cache_path.exists() {
-        return Ok(CachedListfile::default());
-    }
-    let rows = read_local_cache_rows(cache_path)?;
-    Ok(build_cached_listfile(rows))
-}
-
-fn read_local_cache_rows(cache_path: &Path) -> Result<Vec<(u32, String)>, String> {
-    let conn = Connection::open_with_flags(
-        cache_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|err| format!("open {}: {err}", cache_path.display()))?;
-    let mut stmt = match conn.prepare("SELECT fdid, path FROM local_listfile_entries ORDER BY fdid")
-    {
-        Ok(stmt) => stmt,
-        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
-            if message.contains("no such table") =>
-        {
-            return Ok(Vec::new());
-        }
-        Err(err) => return Err(format!("prepare local_listfile_entries query: {err}")),
-    };
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(|err| format!("query local_listfile_entries: {err}"))?;
-    let mut cached_rows = Vec::new();
-    for row in rows {
-        let (fdid, path) = row.map_err(|err| format!("read local_listfile_entries row: {err}"))?;
-        cached_rows.push((fdid, path));
-    }
-    Ok(cached_rows)
-}
-
-fn build_cached_listfile(rows: Vec<(u32, String)>) -> CachedListfile {
-    let mut by_fdid = HashMap::new();
-    let mut by_path = HashMap::new();
-    for (fdid, path) in rows {
-        let leaked = leak_listfile_path(path);
-        by_fdid.insert(fdid, leaked);
-        by_path.insert(leaked.to_ascii_lowercase(), fdid);
-    }
-    CachedListfile { by_fdid, by_path }
-}
-
-fn leak_listfile_path(path: String) -> &'static str {
-    Box::leak(path.into_boxed_str()) as &'static str
 }
 
 pub fn remember_local_cache_entry(cache_path: &Path, fdid: u32, path: &str) -> Result<(), String> {
@@ -131,6 +77,9 @@ pub fn lookup_local_fdid(cache_path: &Path, fdid: u32) -> Result<Option<String>,
     .map(Some)
     .or_else(|err| match err {
         rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        rusqlite::Error::SqliteFailure(_, Some(message)) if message.contains("no such table") => {
+            Ok(None)
+        }
         _ => Err(format!(
             "query local_listfile_entries by fdid {fdid}: {err}"
         )),
@@ -151,6 +100,9 @@ pub fn lookup_local_path(cache_path: &Path, path: &str) -> Result<Option<(u32, S
     .map(Some)
     .or_else(|err| match err {
         rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        rusqlite::Error::SqliteFailure(_, Some(message)) if message.contains("no such table") => {
+            Ok(None)
+        }
         _ => Err(format!(
             "query local_listfile_entries by path `{path}`: {err}"
         )),
