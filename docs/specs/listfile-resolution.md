@@ -37,10 +37,10 @@ The asset resolver maps WoW FileDataIDs and normalized asset paths through local
 - `src/paths.rs` — configurable path roots.
 - `src/lib.rs` — resolver construction with explicit locations.
 
-## Known gaps (current cycle)
+## Completion evidence
 
-- [ ] Re-run the game-engine full project checks against this local dependency.
-- [ ] Publish a fetchable commit and update wow-ui-sim's pinned Git revision after explicit push authorization.
+- [x] Game-engine focused listfile tests and full `./run-tests.sh` pass against the lazy resolver contract.
+- [x] Fetchable asset-resolver revision `292bea963293a8445b58fb80af25ae5f843f1574` is published and pinned by wow-ui-sim commit `ae3c3bead`.
 
 ## Out of scope
 
