@@ -53,11 +53,19 @@ fn community_listfile_path(paths: &ResolverPaths) -> PathBuf {
     community_path
 }
 
+/// Resolve symlinks so worktrees linking one listfile share its cache. A
+/// missing source has no target to resolve; its path is still its identity.
+fn canonical_source_path(path: PathBuf) -> PathBuf {
+    std::fs::canonicalize(&path).unwrap_or(path)
+}
+
 impl Listfile {
     pub(crate) fn from_paths(paths: &ResolverPaths) -> Self {
+        let community_path = canonical_source_path(community_listfile_path(paths));
+        let community_cache_path = listfile_cache::cache_path(paths, &community_path);
         Self::new(
-            community_listfile_path(paths),
-            listfile_cache::cache_path(paths),
+            community_path,
+            community_cache_path,
             paths.shared_data_path("local-listfile-cache.sqlite"),
         )
     }
@@ -366,5 +374,93 @@ mod tests {
 
         let listfile = Listfile::new(community_path, community_cache, local_cache);
         assert_eq!(listfile.lookup_fdid(fdid), Some(local_path));
+    }
+
+    const SHARED_FDID: u32 = 5_678_901;
+
+    fn resolver_paths(temp: &TestTempDir, source_dir: &str) -> ResolverPaths {
+        ResolverPaths::from_config(
+            crate::paths::AssetResolverConfig::new()
+                .with_data_root(temp.path(source_dir))
+                .with_shared_data_root(temp.path("shared"))
+                .with_cache_root(temp.path("cache")),
+        )
+    }
+
+    fn write_source_listfile(temp: &TestTempDir, source_dir: &str, community_path: &str) {
+        fs::create_dir_all(temp.path(source_dir)).unwrap();
+        let source = temp.path(source_dir).join("community-listfile.csv");
+        write_community_row(&source, SHARED_FDID, community_path);
+    }
+
+    /// Rewrite a source listfile without changing its mtime, so only a cache
+    /// rebuild (not a fresh-cache reuse) can observe the new content.
+    fn rewrite_keeping_mtime(path: &Path, community_path: &str) {
+        let mtime = fs::metadata(path).unwrap().modified().unwrap();
+        write_community_row(path, SHARED_FDID, community_path);
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+    }
+
+    fn community_row(paths: &ResolverPaths) -> Option<String> {
+        Listfile::from_paths(paths)
+            .with_community_cache(|cache| cache.lookup_fdid(SHARED_FDID))
+            .unwrap()
+    }
+
+    #[test]
+    fn distinct_sources_sharing_data_root_do_not_invalidate_each_other() {
+        let temp = TestTempDir::new();
+        write_source_listfile(&temp, "project-a", "Interface/A.blp");
+        write_source_listfile(&temp, "project-b", "Interface/B.blp");
+        let paths_a = resolver_paths(&temp, "project-a");
+        let paths_b = resolver_paths(&temp, "project-b");
+
+        assert_eq!(community_row(&paths_a).as_deref(), Some("Interface/A.blp"));
+        assert_eq!(community_row(&paths_b).as_deref(), Some("Interface/B.blp"));
+        rewrite_keeping_mtime(
+            &temp.path("project-a").join("community-listfile.csv"),
+            "Interface/Rebuilt.blp",
+        );
+
+        assert_eq!(
+            community_row(&paths_a).as_deref(),
+            Some("Interface/A.blp"),
+            "opening project B's listfile must not force project A to rebuild"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_source_reuses_the_target_listfile_cache() {
+        let temp = TestTempDir::new();
+        write_source_listfile(&temp, "canonical", "Interface/Canonical.blp");
+        fs::create_dir_all(temp.path("worktree")).unwrap();
+        std::os::unix::fs::symlink(
+            temp.path("canonical").join("community-listfile.csv"),
+            temp.path("worktree").join("community-listfile.csv"),
+        )
+        .unwrap();
+
+        let canonical = resolver_paths(&temp, "canonical");
+        assert_eq!(
+            community_row(&canonical).as_deref(),
+            Some("Interface/Canonical.blp")
+        );
+        rewrite_keeping_mtime(
+            &temp.path("canonical").join("community-listfile.csv"),
+            "Interface/Rebuilt.blp",
+        );
+
+        let worktree = resolver_paths(&temp, "worktree");
+        assert_eq!(
+            community_row(&worktree).as_deref(),
+            Some("Interface/Canonical.blp"),
+            "a symlink to an already-cached listfile must not rebuild the cache"
+        );
     }
 }

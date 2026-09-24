@@ -18,6 +18,7 @@ The asset resolver maps WoW FileDataIDs and normalized asset paths through local
 - [x] Persist community-resolved entries into the local SQLite cache and in-memory indexes.
 - [x] Fall back to the community listfile only after a local miss.
 - [x] Preserve configurable source, shared-data, and extraction-cache roots.
+- [x] Keep one community SQLite cache per canonical source listfile, so consumers sharing a data root with different sources do not force each other's rebuilds, and symlinked sources share their target's cache.
 
 ## How it works
 
@@ -33,7 +34,7 @@ The asset resolver maps WoW FileDataIDs and normalized asset paths through local
 
 ## Tests asserting this spec
 
-- `src/listfile.rs` — lazy local FDID/path lookup, cache population, missing-table behavior, and local priority.
+- `src/listfile.rs` — lazy local FDID/path lookup, cache population, missing-table behavior, local priority, and per-source community cache reuse.
 - `src/paths.rs` — configurable path roots.
 - `src/lib.rs` — resolver construction with explicit locations.
 
@@ -44,5 +45,5 @@ The asset resolver maps WoW FileDataIDs and normalized asset paths through local
 
 ## Out of scope
 
-- Changing CASC extraction, cache locations, community listfile import format, or lookup results.
+- Changing CASC extraction, community listfile import format, or lookup results.
 - Permanently patching consumers to a machine-local asset-resolver path.

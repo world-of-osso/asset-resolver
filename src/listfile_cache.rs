@@ -6,10 +6,21 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::paths::ResolverPaths;
 
-const COMMUNITY_LISTFILE_CACHE_PATH: &str = "community-listfile.sqlite";
+/// One cache file per source listfile: projects sharing a data root may read
+/// different community listfiles, and a single shared cache would rebuild
+/// every time a different source opened it.
+pub(crate) fn cache_path(paths: &ResolverPaths, source_path: &Path) -> PathBuf {
+    let source_key = fnv1a_64(source_path.as_os_str().as_encoded_bytes());
+    paths.shared_data_path(format!("community-listfile-{source_key:016x}.sqlite"))
+}
 
-pub(crate) fn cache_path(paths: &ResolverPaths) -> PathBuf {
-    paths.shared_data_path(COMMUNITY_LISTFILE_CACHE_PATH)
+/// Stable across processes and toolchains, unlike `std`'s `DefaultHasher`.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    bytes.iter().fold(OFFSET_BASIS, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(PRIME)
+    })
 }
 
 pub struct CommunityCache {
