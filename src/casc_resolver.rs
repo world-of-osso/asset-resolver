@@ -1,9 +1,9 @@
 //! Internal CASC-backed extractor for the disk asset cache.
 //!
 //! Reads directly from a local WoW installation discovered via
-//! [`wow_install_path`]. On first use, parses `.build.info` and the build
-//! config to find root/encoding keys, loads cached resolution files, and
-//! lazily initializes archive indices only when an actual FDID extraction is
+//! [`wow_install_path`]. On first use, reads the requested product from
+//! `.product.db` and its build config to find root/encoding keys, loads cached
+//! resolution files, and lazily initializes archive indices only when an actual FDID extraction is
 //! needed.
 
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ use std::sync::{Mutex, OnceLock};
 use binrw::BinRead;
 use cascette_client_storage::index::IndexManager;
 use cascette_client_storage::storage::ArchiveManager;
-use cascette_client_storage::{BuildInfoFile, Installation};
+use cascette_client_storage::{Installation, read_installed_product};
 
 use crate::casc_cache::CascResolutionCache;
 use crate::listfile::Listfile;
@@ -608,33 +608,16 @@ fn read_refresh_file_by_local_archive(
 }
 
 fn read_active_build(install_root: &Path) -> Result<ActiveBuild, String> {
-    let build_info_path = install_root.join(".build.info");
-    let build_info = std::fs::read_to_string(&build_info_path)
-        .map_err(|e| format!("read {}: {e}", build_info_path.display()))?;
-    let build_info = BuildInfoFile::parse_str(&build_info)
-        .map_err(|e| format!("parse {}: {e}", build_info_path.display()))?;
-    let selected_product = selected_wow_product();
-    let entry = build_info
-        .entries()
-        .into_iter()
-        .find(|entry| entry.is_active() && entry.product() == Some(selected_product.as_str()))
-        .or_else(|| build_info.active_entry())
-        .ok_or_else(|| format!("{} has no active build entry", build_info_path.display()))?;
-    let product = entry
-        .product()
-        .unwrap_or(selected_product.as_str())
-        .to_string();
-    let build_key = entry
-        .build_key()
-        .ok_or_else(|| "active WoW build entry has no build key".to_string())?;
-    let build_config_path = data_config_path(install_root, build_key)?;
+    let installed = read_installed_product(install_root, &selected_wow_product())
+        .map_err(|e| format!("read installed WoW product: {e}"))?;
+    let build_config_path = data_config_path(install_root, &installed.build_key)?;
     let build_config = std::fs::File::open(&build_config_path)
         .map_err(|e| format!("open {}: {e}", build_config_path.display()))?;
     let config = BuildConfig::parse(build_config)
         .map_err(|e| format!("parse {}: {e}", build_config_path.display()))?;
     Ok(ActiveBuild {
-        product,
-        build_key: build_key.to_string(),
+        product: installed.product,
+        build_key: installed.build_key,
         config,
     })
 }
@@ -707,6 +690,125 @@ fn load_tact_keys(paths: &ResolverPaths) -> TactKeyStore {
         }
     }
     keys
+}
+
+#[cfg(test)]
+mod installed_build_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const RETAIL_KEY: &str = "0123456789abcdef0123456789abcdef";
+    const FOREVER_KEY: &str = "3bd89ce2721f7c75e7525dc83741076f";
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new() -> Self {
+            static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "asset-resolver-product-db-{}-{}",
+                std::process::id(),
+                NEXT_ID.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn write_config(&self, key: &str, root: &str) {
+            let path = data_config_path(&self.0, key).unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, format!("root = {root}\nencoding = {root} {root}\n")).unwrap();
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    fn with_forever_product<T>(f: impl FnOnce() -> T) -> T {
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _lock = ENV_LOCK.lock().unwrap();
+        let old = std::env::var_os("WOW_PRODUCT");
+        unsafe { std::env::set_var("WOW_PRODUCT", "wow_forever") };
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => unsafe { std::env::set_var("WOW_PRODUCT", value) },
+                    None => unsafe { std::env::remove_var("WOW_PRODUCT") },
+                }
+            }
+        }
+        let _restore = Restore(old);
+        f()
+    }
+
+    // Wire-format fixture independent of cascette's protobuf definitions.
+    fn varint(mut value: usize) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        while value >= 128 {
+            bytes.push((value as u8 & 0x7f) | 0x80);
+            value >>= 7;
+        }
+        bytes.push(value as u8);
+        bytes
+    }
+
+    fn field(tag: usize, value: &[u8]) -> Vec<u8> {
+        let mut bytes = varint((tag << 3) | 2);
+        bytes.extend(varint(value.len()));
+        bytes.extend_from_slice(value);
+        bytes
+    }
+
+    fn product(code: &str, key: &str) -> Vec<u8> {
+        let mut base = field(7, b"1.60.1");
+        base.extend(field(14, key.as_bytes()));
+        base.extend(field(16, RETAIL_KEY.as_bytes()));
+        let mut install = field(2, code.as_bytes());
+        install.extend(field(4, &field(1, &base)));
+        field(1, &install)
+    }
+
+    #[test]
+    fn requested_forever_build_is_selected_without_build_info_row() {
+        let fixture = Fixture::new();
+        std::fs::write(
+            fixture.0.join(".build.info"),
+            format!("Active!DEC:1|Build Key!HEX:16|Product!STRING:0\n1|{RETAIL_KEY}|wow\n"),
+        )
+        .unwrap();
+        let mut db = product("wow", RETAIL_KEY);
+        db.extend(product("wow_forever", FOREVER_KEY));
+        std::fs::write(fixture.0.join(".product.db"), db).unwrap();
+        fixture.write_config(RETAIL_KEY, RETAIL_KEY);
+        fixture.write_config(FOREVER_KEY, FOREVER_KEY);
+
+        let selected = with_forever_product(|| read_active_build(&fixture.0)).unwrap();
+        assert_eq!(selected.product, "wow_forever");
+        assert_eq!(selected.build_key, FOREVER_KEY);
+        assert_eq!(selected.config.root(), Some(FOREVER_KEY));
+    }
+
+    #[test]
+    fn missing_requested_product_errors_instead_of_using_retail() {
+        let fixture = Fixture::new();
+        std::fs::write(
+            fixture.0.join(".build.info"),
+            format!("Active!DEC:1|Build Key!HEX:16|Product!STRING:0\n1|{RETAIL_KEY}|wow\n"),
+        )
+        .unwrap();
+        std::fs::write(fixture.0.join(".product.db"), product("wow", RETAIL_KEY)).unwrap();
+        fixture.write_config(RETAIL_KEY, RETAIL_KEY);
+
+        let error = with_forever_product(|| read_active_build(&fixture.0))
+            .err()
+            .unwrap();
+        assert!(error.contains("wow_forever"), "{error}");
+        assert!(error.contains(".product.db"), "{error}");
+    }
 }
 
 fn run_async<F: std::future::Future>(fut: F) -> F::Output {
