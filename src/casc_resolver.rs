@@ -12,20 +12,45 @@ use std::sync::{Mutex, OnceLock};
 use binrw::BinRead;
 use cascette_client_storage::index::IndexManager;
 use cascette_client_storage::storage::ArchiveManager;
-use cascette_client_storage::{Installation, read_installed_product};
+use cascette_client_storage::{BuildInfoFile, Installation, read_installed_product};
 
 use crate::casc_cache::CascResolutionCache;
 use crate::listfile::Listfile;
 use crate::paths::ResolverPaths;
 use cascette_crypto::{ContentKey, EncodingKey, TactKeyStore};
-use cascette_formats::blte::BlteFile;
-use cascette_formats::config::BuildConfig;
+use cascette_formats::blte::{BlteFile, PartialDecode};
+use cascette_formats::config::{BuildConfig, KeyringConfig};
 use cascette_formats::encoding::EncodingFile;
 use tokio::runtime::Handle as TokioHandle;
 
 const LOCAL_CASC_HEADER_SIZE: usize = 30;
 const EXTERNAL_TACT_KEYS_PATH: &str = "tactkeys/WoW.txt";
 const DEFAULT_WOW_PRODUCT: &str = "wow";
+
+pub use cascette_formats::blte::MissingKeyChunk;
+
+/// A file extracted from local CASC.
+#[derive(Debug)]
+pub struct ExtractedFile {
+    pub path: PathBuf,
+    /// Encrypted chunks whose TACT key is unknown; their ranges are zero-filled.
+    pub missing_keys: Vec<MissingKeyChunk>,
+}
+
+/// File content read from local CASC, possibly with zero-filled encrypted chunks.
+struct FileContent {
+    data: Vec<u8>,
+    missing_keys: Vec<MissingKeyChunk>,
+}
+
+impl From<PartialDecode> for FileContent {
+    fn from(decoded: PartialDecode) -> Self {
+        Self {
+            data: decoded.data,
+            missing_keys: decoded.missing_keys,
+        }
+    }
+}
 
 static CASC: OnceLock<Option<CascState>> = OnceLock::new();
 static WOW_INSTALL_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -113,8 +138,8 @@ fn candidate_install_paths() -> Vec<PathBuf> {
 }
 
 struct CascState {
-    paths: ResolverPaths,
     install: Installation,
+    keys: TactKeyStore,
     cache: CascResolutionCache,
     initialized: Mutex<InitState>,
     local_access: Mutex<LocalAccessState>,
@@ -135,7 +160,6 @@ enum LocalAccessState {
 struct LocalArchiveAccess {
     indices: IndexManager,
     archives: ArchiveManager,
-    keys: TactKeyStore,
 }
 
 struct ActiveBuild {
@@ -167,9 +191,12 @@ impl CascState {
     fn read_file_by_encoding_key(
         &self,
         encoding_key: &cascette_crypto::EncodingKey,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<FileContent, String> {
         match run_async(self.install.read_file_by_encoding_key(encoding_key)) {
-            Ok(data) => Ok(data),
+            Ok(data) => Ok(FileContent {
+                data,
+                missing_keys: Vec::new(),
+            }),
             Err(primary_err) => self
                 .read_file_by_encoding_key_with_keys(encoding_key)
                 .map_err(|fallback_err| {
@@ -180,15 +207,19 @@ impl CascState {
         }
     }
 
-    fn read_file_by_path(&self, path: &str) -> Result<Vec<u8>, String> {
+    fn read_file_by_path(&self, path: &str) -> Result<FileContent, String> {
         run_async(self.install.read_file_by_path(path))
+            .map(|data| FileContent {
+                data,
+                missing_keys: Vec::new(),
+            })
             .map_err(|err| format!("read CASC path {path}: {err}"))
     }
 
     fn read_file_by_encoding_key_with_keys(
         &self,
         encoding_key: &cascette_crypto::EncodingKey,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<FileContent, String> {
         let local = self.ensure_local_access()?;
         let LocalAccessState::Initialized(local) = &*local else {
             return Err("local CASC access not initialized".to_string());
@@ -205,20 +236,9 @@ impl CascState {
                 index_entry.size,
             )
             .map_err(|e| format!("read raw BLTE archive entry: {e}"))?;
-        let blte_bytes = if raw_blte.len() >= LOCAL_CASC_HEADER_SIZE + 4
-            && &raw_blte[LOCAL_CASC_HEADER_SIZE..LOCAL_CASC_HEADER_SIZE + 4] == b"BLTE"
-        {
-            &raw_blte[LOCAL_CASC_HEADER_SIZE..]
-        } else {
-            raw_blte.as_slice()
-        };
-        let blte = BlteFile::read_options(
-            &mut std::io::Cursor::new(blte_bytes),
-            binrw::Endian::Big,
-            (),
-        )
-        .map_err(|e| format!("parse BLTE container: {e}"))?;
-        blte.decompress_with_keys(&local.keys)
+        parse_local_blte(&raw_blte)?
+            .decompress_zeroing_missing_keys(&self.keys)
+            .map(FileContent::from)
             .map_err(|e| format!("decrypt/decompress BLTE container: {e}"))
     }
 
@@ -236,16 +256,11 @@ impl CascState {
         };
         let mut indices = IndexManager::new(&data_dir);
         let mut archives = ArchiveManager::new(&data_dir);
-        let keys = load_tact_keys(&self.paths);
 
         let init_result = (|| -> Result<LocalArchiveAccess, String> {
             run_async(indices.load_all()).map_err(|e| format!("load CASC indices: {e}"))?;
             run_async(archives.open_all()).map_err(|e| format!("open CASC archives: {e}"))?;
-            Ok(LocalArchiveAccess {
-                indices,
-                archives,
-                keys,
-            })
+            Ok(LocalArchiveAccess { indices, archives })
         })();
 
         match init_result {
@@ -295,7 +310,7 @@ pub(crate) fn ensure_file_cached_at_path_with_paths(
         shared_path.display()
     );
     match extract_fdid_to_path_with_paths(paths, listfile, fdid, &shared_path) {
-        Ok(path) => Some(path),
+        Ok(extracted) => Some(extracted.path),
         Err(err) => {
             eprintln!(
                 "asset-cache extraction failed: fdid {fdid} -> {}: {err}",
@@ -340,7 +355,7 @@ pub(crate) fn resolve_bytes_with_paths(
     }
 
     match read_fdid_bytes(casc, listfile, fdid) {
-        Ok(data) => Some(data),
+        Ok(content) => Some(content.data),
         Err(err) => {
             eprintln!("asset-cache byte resolve failed: fdid {fdid}: {err}");
             None
@@ -348,7 +363,7 @@ pub(crate) fn resolve_bytes_with_paths(
     }
 }
 
-pub fn extract_fdid_to_path(fdid: u32, out_path: &Path) -> Result<PathBuf, String> {
+pub fn extract_fdid_to_path(fdid: u32, out_path: &Path) -> Result<ExtractedFile, String> {
     extract_fdid_to_path_with_paths(
         crate::paths::default_paths(),
         crate::listfile::get_default(),
@@ -362,30 +377,57 @@ fn extract_fdid_to_path_with_paths(
     listfile: &Listfile,
     fdid: u32,
     out_path: &Path,
-) -> Result<PathBuf, String> {
+) -> Result<ExtractedFile, String> {
     let casc = get_casc(paths)?;
     casc.ensure_initialized()?;
 
-    let data = read_fdid_bytes(casc, listfile, fdid)?;
-    write_to_path(out_path, &data)?;
+    let content = read_fdid_bytes(casc, listfile, fdid)?;
+    write_to_path(out_path, &content.data)?;
     eprintln!("CASC: extracted FDID {fdid} -> {}", out_path.display());
-    Ok(out_path.to_path_buf())
+    Ok(ExtractedFile {
+        path: out_path.to_path_buf(),
+        missing_keys: content.missing_keys,
+    })
 }
 
-fn read_fdid_bytes(casc: &CascState, listfile: &Listfile, fdid: u32) -> Result<Vec<u8>, String> {
-    match casc.cache.resolve_fdid(fdid) {
+fn read_fdid_bytes(
+    casc: &CascState,
+    listfile: &Listfile,
+    fdid: u32,
+) -> Result<FileContent, String> {
+    let content = match casc.cache.resolve_fdid(fdid) {
         Some((_, encoding_key_bytes)) => {
             read_fdid_bytes_by_encoding_key(casc, fdid, encoding_key_bytes)
         }
         None => read_fdid_bytes_by_listfile_path(casc, listfile, fdid),
+    }?;
+    if !content.missing_keys.is_empty() {
+        eprintln!(
+            "CASC warning: FDID {fdid} has encrypted chunks with unknown TACT keys, zero-filled: {}",
+            describe_missing_keys(&content.missing_keys)
+        );
     }
+    Ok(content)
+}
+
+pub fn describe_missing_keys(missing_keys: &[MissingKeyChunk]) -> String {
+    missing_keys
+        .iter()
+        .map(|chunk| {
+            format!(
+                "{:016X} (chunk {}, {} bytes at offset {})",
+                chunk.key_name, chunk.chunk_index, chunk.size, chunk.offset
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn read_fdid_bytes_by_encoding_key(
     casc: &CascState,
     fdid: u32,
     encoding_key_bytes: [u8; 16],
-) -> Result<Vec<u8>, String> {
+) -> Result<FileContent, String> {
     let encoding_key = cascette_crypto::EncodingKey::from_bytes(encoding_key_bytes);
     casc.read_file_by_encoding_key(&encoding_key)
         .map_err(|e| format!("CASC read FDID {fdid} via encoding key {encoding_key}: {e}"))
@@ -395,7 +437,7 @@ fn read_fdid_bytes_by_listfile_path(
     casc: &CascState,
     listfile: &Listfile,
     fdid: u32,
-) -> Result<Vec<u8>, String> {
+) -> Result<FileContent, String> {
     let path = listfile.lookup_fdid(fdid).ok_or_else(|| {
         format!("CASC resolve FDID {fdid}: missing resolution and listfile entry")
     })?;
@@ -440,6 +482,7 @@ fn init_casc(paths: &ResolverPaths) -> Result<CascState, String> {
     let install = Installation::open(data_root).map_err(|e| format!("CASC open: {e}"))?;
 
     let active_build = read_active_build(install_root)?;
+    let keys = load_tact_keys(paths, install_root, &active_build)?;
     let casc_dir = paths.casc_cache_path(&active_build.product, &active_build.build_key);
     ensure_resolution_cache(paths, install_root, &install, &casc_dir)?;
     let cache = CascResolutionCache::open(&casc_dir)?;
@@ -450,8 +493,8 @@ fn init_casc(paths: &ResolverPaths) -> Result<CascState, String> {
         casc_dir.display()
     );
     Ok(CascState {
-        paths: paths.clone(),
         install,
+        keys,
         cache,
         initialized: Mutex::new(InitState::Uninitialized),
         local_access: Mutex::new(LocalAccessState::Uninitialized),
@@ -486,13 +529,9 @@ pub fn refresh_resolution_cache_for_install(install_root: &Path) -> Result<PathB
     let data_root = install_root.join("Data");
     let install = Installation::open(data_root).map_err(|e| format!("CASC open: {e}"))?;
     let active_build = read_active_build(install_root)?;
+    let keys = load_tact_keys(crate::paths::default_paths(), install_root, &active_build)?;
     let casc_dir = crate::paths::casc_cache_path(&active_build.product, &active_build.build_key);
-    rebuild_resolution_cache(
-        crate::paths::default_paths(),
-        &install,
-        &casc_dir,
-        &active_build.config,
-    )?;
+    rebuild_resolution_cache(&keys, &install, &casc_dir, &active_build.config)?;
     Ok(casc_dir)
 }
 
@@ -511,11 +550,12 @@ fn ensure_resolution_cache(
     run_async(install.initialize()).map_err(|e| format!("CASC init for cache bootstrap: {e}"))?;
 
     let active_build = read_active_build(install_root)?;
-    rebuild_resolution_cache(paths, install, casc_dir, &active_build.config)
+    let keys = load_tact_keys(paths, install_root, &active_build)?;
+    rebuild_resolution_cache(&keys, install, casc_dir, &active_build.config)
 }
 
 fn rebuild_resolution_cache(
-    paths: &ResolverPaths,
+    keys: &TactKeyStore,
     install: &Installation,
     casc_dir: &Path,
     build_config: &BuildConfig,
@@ -531,7 +571,7 @@ fn rebuild_resolution_cache(
         .as_deref()
         .ok_or_else(|| "active WoW build config encoding entry has no encoding key".to_string())
         .and_then(parse_encoding_key)?;
-    let encoding_data = read_refresh_file_by_encoding_key(paths, install, &encoding_key)
+    let encoding_data = read_refresh_file_by_encoding_key(keys, install, &encoding_key)
         .map_err(|e| format!("read encoding file {encoding_key}: {e}"))?;
     std::fs::write(casc_dir.join("encoding.bin"), &encoding_data)
         .map_err(|e| format!("write {}: {e}", casc_dir.join("encoding.bin").display()))?;
@@ -541,7 +581,7 @@ fn rebuild_resolution_cache(
         .ok_or_else(|| "active WoW build config has no root entry".to_string())
         .and_then(parse_content_key)?;
     let root_encoding_key = resolve_content_key_from_encoding(&encoding_data, &root_content_key)?;
-    let root_data = read_refresh_file_by_encoding_key(paths, install, &root_encoding_key)
+    let root_data = read_refresh_file_by_encoding_key(keys, install, &root_encoding_key)
         .map_err(|e| format!("read root file {root_encoding_key}: {e}"))?;
     std::fs::write(casc_dir.join("root.bin"), &root_data)
         .map_err(|e| format!("write {}: {e}", casc_dir.join("root.bin").display()))?;
@@ -550,14 +590,14 @@ fn rebuild_resolution_cache(
 }
 
 fn read_refresh_file_by_encoding_key(
-    paths: &ResolverPaths,
+    keys: &TactKeyStore,
     install: &Installation,
     encoding_key: &EncodingKey,
 ) -> Result<Vec<u8>, String> {
     match run_async(install.read_file_by_encoding_key(encoding_key)) {
         Ok(data) => Ok(data),
         Err(primary_err) => {
-            read_refresh_file_by_local_archive(paths, encoding_key).map_err(|fallback_err| {
+            read_refresh_file_by_local_archive(keys, encoding_key).map_err(|fallback_err| {
                 format!(
                     "{primary_err}; key-aware local archive fallback also failed: {fallback_err}"
                 )
@@ -567,7 +607,7 @@ fn read_refresh_file_by_encoding_key(
 }
 
 fn read_refresh_file_by_local_archive(
-    paths: &ResolverPaths,
+    keys: &TactKeyStore,
     encoding_key: &EncodingKey,
 ) -> Result<Vec<u8>, String> {
     let data_dir = wow_install_path()
@@ -576,7 +616,6 @@ fn read_refresh_file_by_local_archive(
         .join("data");
     let mut indices = IndexManager::new(&data_dir);
     let mut archives = ArchiveManager::new(&data_dir);
-    let keys = load_tact_keys(paths);
     run_async(indices.load_all()).map_err(|e| format!("load CASC indices: {e}"))?;
     run_async(archives.open_all()).map_err(|e| format!("open CASC archives: {e}"))?;
 
@@ -590,21 +629,26 @@ fn read_refresh_file_by_local_archive(
             index_entry.size,
         )
         .map_err(|e| format!("read raw BLTE archive entry: {e}"))?;
+    // Root and encoding feed the resolution cache, so they must decode fully.
+    parse_local_blte(&raw_blte)?
+        .decompress_with_keys(keys)
+        .map_err(|e| format!("decrypt/decompress BLTE container: {e}"))
+}
+
+fn parse_local_blte(raw_blte: &[u8]) -> Result<BlteFile, String> {
     let blte_bytes = if raw_blte.len() >= LOCAL_CASC_HEADER_SIZE + 4
         && &raw_blte[LOCAL_CASC_HEADER_SIZE..LOCAL_CASC_HEADER_SIZE + 4] == b"BLTE"
     {
         &raw_blte[LOCAL_CASC_HEADER_SIZE..]
     } else {
-        raw_blte.as_slice()
+        raw_blte
     };
-    let blte = BlteFile::read_options(
+    BlteFile::read_options(
         &mut std::io::Cursor::new(blte_bytes),
         binrw::Endian::Big,
         (),
     )
-    .map_err(|e| format!("parse BLTE container: {e}"))?;
-    blte.decompress_with_keys(&keys)
-        .map_err(|e| format!("decrypt/decompress BLTE container: {e}"))
+    .map_err(|e| format!("parse BLTE container: {e}"))
 }
 
 fn read_active_build(install_root: &Path) -> Result<ActiveBuild, String> {
@@ -628,7 +672,7 @@ fn selected_wow_product() -> String {
 
 fn data_config_path(install_root: &Path, key: &str) -> Result<PathBuf, String> {
     if key.len() < 4 {
-        return Err(format!("invalid build config key: {key}"));
+        return Err(format!("invalid config key: {key}"));
     }
     Ok(install_root
         .join("Data/config")
@@ -677,7 +721,13 @@ fn parse_hex_16(value: &str) -> Result<[u8; 16], String> {
     Ok(out)
 }
 
-fn load_tact_keys(paths: &ResolverPaths) -> TactKeyStore {
+/// TACT keys from the external wowdev/TACTKeys list plus the installed
+/// build's keyring config (`.build.info` `KeyRing` for the selected product).
+fn load_tact_keys(
+    paths: &ResolverPaths,
+    install_root: &Path,
+    active_build: &ActiveBuild,
+) -> Result<TactKeyStore, String> {
     let mut keys = TactKeyStore::new();
     let key_path = paths.resolve_data_path(EXTERNAL_TACT_KEYS_PATH);
     if let Ok(content) = std::fs::read_to_string(&key_path) {
@@ -689,7 +739,52 @@ fn load_tact_keys(paths: &ResolverPaths) -> TactKeyStore {
             );
         }
     }
-    keys
+    let keyring_keys =
+        read_keyring_keys(install_root, &active_build.product, &active_build.build_key)?;
+    if !keyring_keys.is_empty() {
+        eprintln!(
+            "CASC: loaded {} keyring TACT keys for {} build {}",
+            keyring_keys.len(),
+            active_build.product,
+            active_build.build_key
+        );
+    }
+    for key in keyring_keys {
+        keys.add(key);
+    }
+    Ok(keys)
+}
+
+fn read_keyring_keys(
+    install_root: &Path,
+    product: &str,
+    build_key: &str,
+) -> Result<Vec<cascette_crypto::TactKey>, String> {
+    let build_info_path = install_root.join(".build.info");
+    let content = std::fs::read_to_string(&build_info_path)
+        .map_err(|e| format!("read {}: {e}", build_info_path.display()))?;
+    let build_info = BuildInfoFile::parse_str(&content)
+        .map_err(|e| format!("parse {}: {e}", build_info_path.display()))?;
+    let entries = build_info.entries();
+    let entry = entries
+        .iter()
+        .find(|entry| entry.product() == Some(product) && entry.build_key() == Some(build_key))
+        .ok_or_else(|| {
+            format!(
+                "{} has no row for {product} build {build_key}",
+                build_info_path.display()
+            )
+        })?;
+    let Some(keyring_key) = entry.keyring() else {
+        return Ok(Vec::new());
+    };
+    let keyring_path = data_config_path(install_root, keyring_key)?;
+    let keyring_file = std::fs::File::open(&keyring_path)
+        .map_err(|e| format!("open keyring {}: {e}", keyring_path.display()))?;
+    KeyringConfig::parse(keyring_file)
+        .map_err(|e| format!("parse keyring {}: {e}", keyring_path.display()))?
+        .tact_keys()
+        .map_err(|e| format!("invalid keyring {}: {e}", keyring_path.display()))
 }
 
 #[cfg(test)]
@@ -790,6 +885,67 @@ mod installed_build_tests {
         assert_eq!(selected.product, "wow_forever");
         assert_eq!(selected.build_key, FOREVER_KEY);
         assert_eq!(selected.config.root(), Some(FOREVER_KEY));
+    }
+
+    const KEYRING_KEY: &str = "3ca57fe7319a297346440e4d2a03a0cd";
+    const CLASSIC_KEY: &str = "7dba9c25479632aebc53be9d187818e3";
+
+    fn write_keyring_install(fixture: &Fixture) {
+        std::fs::write(
+            fixture.0.join(".build.info"),
+            format!(
+                "Active!DEC:1|Build Key!HEX:16|KeyRing!HEX:16|Product!STRING:0\n\
+                 1|{RETAIL_KEY}|{KEYRING_KEY}|wow\n\
+                 1|{CLASSIC_KEY}||wow_classic\n"
+            ),
+        )
+        .unwrap();
+        let path = data_config_path(&fixture.0, KEYRING_KEY).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            "key-4eb4869f95f23b53 = c9316739348dcc033aa8112f9a3acf5d\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn selected_build_keyring_is_loaded_as_tact_keys() {
+        let fixture = Fixture::new();
+        write_keyring_install(&fixture);
+
+        let keys = read_keyring_keys(&fixture.0, "wow", RETAIL_KEY).unwrap();
+
+        assert_eq!(
+            keys,
+            vec![
+                cascette_crypto::TactKey::from_hex(
+                    0x533B_F295_9F86_B44E,
+                    "c9316739348dcc033aa8112f9a3acf5d"
+                )
+                .unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn product_without_keyring_loads_no_keyring_keys() {
+        let fixture = Fixture::new();
+        write_keyring_install(&fixture);
+
+        let keys = read_keyring_keys(&fixture.0, "wow_classic", CLASSIC_KEY).unwrap();
+
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn keyring_for_other_build_is_an_error() {
+        let fixture = Fixture::new();
+        write_keyring_install(&fixture);
+
+        let error = read_keyring_keys(&fixture.0, "wow", CLASSIC_KEY).unwrap_err();
+
+        assert!(error.contains("has no row for wow build"), "{error}");
     }
 
     #[test]
