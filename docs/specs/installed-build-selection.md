@@ -11,6 +11,15 @@ The CASC resolver selects the requested local product build from `.product.db` b
 - [x] Treat field-14 selection as a deterministic resolver policy, not a claim of native Battle.net selection semantics.
 - [x] Leave completeness and local config/archive availability to the readers that need those assets.
 
+### Explicit startup initialization
+
+- [ ] Expose `CascListfileResolver::initialize() -> Result<(), String>` so callers can eagerly initialize local CASC before extracting an asset. Call it from a worker thread: loading keys, resolution tables and installation indices can take seconds.
+- [ ] Reuse process-wide state across resolver instances; the first CASC caller's paths determine that state. Repeated initialization returns the cached success or failure, without retrying initialization or switching configuration.
+- [ ] Report bootstrap failures by logging their underlying cause and returning `CASC not available`; return and cache installation-initialization errors as `CASC init: ...`. Without the `casc` feature, return `asset-resolver was built without the casc feature`.
+- [ ] Initialize without resolving an asset FDID, loading the resolver's listfile, or writing an extracted asset. Resolution-cache generation may still write metadata; success does not prove any particular asset is readable, and direct encoding-key archive access remains lazy.
+
+These startup requirements are source-audited at `6fcab75`, not test-verified by this documentation audit.
+
 ## How it works
 
 - [`src/casc_resolver.rs`](../../src/casc_resolver.rs) obtains product metadata through `cascette-client-storage` and opens the resulting build configuration.
@@ -18,12 +27,15 @@ The CASC resolver selects the requested local product build from `.product.db` b
 
 ## Implementation inventory
 
-- `src/casc_resolver.rs` — resolves the requested product and opens its build configuration.
+- `src/casc_resolver.rs` — resolves the requested product, opens its build configuration, and initializes shared CASC state.
+- `src/lib.rs` — public `CascListfileResolver::initialize` startup API.
 
 ## Tests asserting this spec
 
 - `src/casc_resolver.rs` — `requested_forever_build_is_selected_without_build_info_row`.
 - `src/casc_resolver.rs` — `missing_requested_product_errors_instead_of_using_retail`.
+
+- `tests/initialize.rs` — local-install success, repeated-call timing, subsequent SoundKit extraction, and feature-disabled error. This audit did not run these tests; they do not assert failure caching or the no-extraction boundary.
 
 ## Known gaps (current cycle)
 
