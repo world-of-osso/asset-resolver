@@ -4,10 +4,10 @@
 
 ## What it must do
 
-- [ ] Return existing cached files unchanged.
-- [ ] Extract an available local asset despite a persisted `.missing` marker, including in a fresh process.
-- [ ] Preserve configured source/shared destination routing and acquired bytes.
-- [ ] Return `None` for unavailable assets without creating a positive output, logging the FileDataID, destination, and cause.
+- [x] Return existing cached files unchanged.
+- [x] Extract an available local asset despite a persisted `.missing` marker, including in a fresh process.
+- [x] Preserve configured source/shared destination routing and acquired bytes.
+- [x] Return `None` for unavailable assets without creating a positive output, logging the FileDataID, destination, and cause.
 
 ## How it works
 
@@ -25,7 +25,7 @@
 
 ## Known gaps (current cycle)
 
-- [ ] Complete targeted GREEN and independent verification.
+- [ ] Complete independent verification; the local-CASC subprocess regression passes.
 
 ## Out of scope
 
