@@ -25,7 +25,7 @@
 
 ## Known gaps (current cycle)
 
-- [ ] Complete independent verification; the local-CASC subprocess regression passes.
+No open cache-repair gaps in this cycle. Independent checks and the full default-CASC package suite pass; native cold-cache rendering and Rust 1.89 compatibility are not claimed.
 
 ## Out of scope
 
