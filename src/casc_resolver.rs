@@ -276,6 +276,12 @@ impl CascState {
     }
 }
 
+/// Open local CASC (TACT keys, resolution cache) and initialize the installation, as
+/// the first extraction would; later calls return the first call's outcome.
+pub(crate) fn initialize_with_paths(paths: &ResolverPaths) -> Result<(), String> {
+    get_casc(paths)?.ensure_initialized()
+}
+
 pub fn ensure_file_cached_at_path(fdid: u32, out_path: &Path) -> Option<PathBuf> {
     ensure_file_cached_at_path_with_paths(
         crate::paths::default_paths(),

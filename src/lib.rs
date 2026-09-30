@@ -35,6 +35,20 @@ impl CascListfileResolver {
             .get_or_init(|| listfile::Listfile::from_paths(&self.paths))
     }
 
+    /// Initialize the process-wide local CASC state before the first extraction.
+    /// Call from a worker thread: loading TACT keys, resolution tables and archive
+    /// indices can take seconds. Later resolvers reuse this initialized state.
+    pub fn initialize(&self) -> Result<(), String> {
+        #[cfg(feature = "casc")]
+        {
+            return casc_resolver::initialize_with_paths(&self.paths);
+        }
+        #[cfg(not(feature = "casc"))]
+        {
+            Err("asset-resolver was built without the casc feature".to_string())
+        }
+    }
+
     pub fn resolve_bytes(&self, fdid: u32) -> Option<Vec<u8>> {
         #[cfg(feature = "casc")]
         {
