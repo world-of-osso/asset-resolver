@@ -115,8 +115,7 @@ fn run_child_stage(stage: &str, root: &Path) {
     let shared = root.join("shared/textures/1244035.blp");
     let marker = shared.with_extension("blp.missing");
     if stage == "persist" {
-        assert!(!shared.exists(), "positive cache must start absent");
-        fs::write(&marker, []).expect("persist historical empty missing marker");
+        persist_legacy_marker(&shared, &marker);
         return;
     }
 
@@ -126,52 +125,68 @@ fn run_child_stage(stage: &str, root: &Path) {
             .with_shared_data_root(root.join("shared")),
     );
     match stage {
-        "recover" => {
-            assert_eq!(fs::read(&marker).expect("persisted marker"), b"");
-            assert!(!requested.exists());
-            assert!(!shared.exists());
-            let bytes = resolver
-                .resolve_bytes(TEXTURE_FDID)
-                .expect("precondition: FDID 1244035 is available in actual local CASC");
-            assert!(bytes.starts_with(b"BLP2"), "local FDID must be BLP2");
-            assert_eq!(
-                resolver.ensure_cached(TEXTURE_FDID, &requested),
-                Some(shared.clone()),
-                "persisted empty marker must not block locally available texture"
-            );
-            assert_eq!(fs::read(&shared).expect("acquired shared texture"), bytes);
-            assert!(!requested.exists(), "must not write source output path");
-        }
-        "positive" => {
-            let requested = root.join("source/textures/positive.blp");
-            let shared = root.join("shared/textures/positive.blp");
-            let bytes = b"user-owned positive fixture; deliberately not CASC bytes\0\xff";
-            fs::write(&shared, bytes).expect("seed positive user fixture");
-            let before = fs::metadata(&shared).expect("positive file state");
-            assert_eq!(
-                resolver.ensure_cached(TEXTURE_FDID, &requested),
-                Some(shared.clone())
-            );
-            let after = fs::metadata(&shared).expect("positive file state after read");
-            assert_eq!(fs::read(&shared).expect("positive bytes"), bytes);
-            assert_eq!(after.ino(), before.ino(), "must not replace positive file");
-            assert_eq!(after.modified().unwrap(), before.modified().unwrap());
-            assert_eq!(
-                after.ctime(),
-                before.ctime(),
-                "must not rewrite positive file"
-            );
-            assert_eq!(after.ctime_nsec(), before.ctime_nsec());
-            assert!(!requested.exists());
-        }
-        "unavailable" => {
-            assert!(resolver.resolve_bytes(UNAVAILABLE_FDID).is_none());
-            let requested = root.join("source/textures/unavailable.blp");
-            let shared = root.join("shared/textures/unavailable.blp");
-            assert_eq!(resolver.ensure_cached(UNAVAILABLE_FDID, &requested), None);
-            assert!(!shared.exists(), "failure must not create positive output");
-            assert!(!requested.exists(), "failure must not write source output");
-        }
+        "recover" => recover_local_texture(&resolver, &requested, &shared, &marker),
+        "positive" => preserve_positive_cache(&resolver, root),
+        "unavailable" => assert_unavailable(&resolver, root),
         _ => panic!("unknown child stage: {stage}"),
     }
+}
+
+fn persist_legacy_marker(shared: &Path, marker: &Path) {
+    assert!(!shared.exists(), "positive cache must start absent");
+    fs::write(marker, []).expect("persist historical empty missing marker");
+}
+
+fn recover_local_texture(
+    resolver: &CascListfileResolver,
+    requested: &Path,
+    shared: &Path,
+    marker: &Path,
+) {
+    assert_eq!(fs::read(marker).expect("persisted marker"), b"");
+    assert!(!requested.exists());
+    assert!(!shared.exists());
+    let bytes = resolver
+        .resolve_bytes(TEXTURE_FDID)
+        .expect("precondition: FDID 1244035 is available in actual local CASC");
+    assert!(bytes.starts_with(b"BLP2"), "local FDID must be BLP2");
+    assert_eq!(
+        resolver.ensure_cached(TEXTURE_FDID, requested),
+        Some(shared.to_path_buf()),
+        "persisted empty marker must not block locally available texture"
+    );
+    assert_eq!(fs::read(shared).expect("acquired shared texture"), bytes);
+    assert!(!requested.exists(), "must not write source output path");
+}
+
+fn preserve_positive_cache(resolver: &CascListfileResolver, root: &Path) {
+    let requested = root.join("source/textures/positive.blp");
+    let shared = root.join("shared/textures/positive.blp");
+    let bytes = b"user-owned positive fixture; deliberately not CASC bytes\0\xff";
+    fs::write(&shared, bytes).expect("seed positive user fixture");
+    let before = fs::metadata(&shared).expect("positive file state");
+    assert_eq!(
+        resolver.ensure_cached(TEXTURE_FDID, &requested),
+        Some(shared.clone())
+    );
+    let after = fs::metadata(&shared).expect("positive file state after read");
+    assert_eq!(fs::read(&shared).expect("positive bytes"), bytes);
+    assert_eq!(after.ino(), before.ino(), "must not replace positive file");
+    assert_eq!(after.modified().unwrap(), before.modified().unwrap());
+    assert_eq!(
+        after.ctime(),
+        before.ctime(),
+        "must not rewrite positive file"
+    );
+    assert_eq!(after.ctime_nsec(), before.ctime_nsec());
+    assert!(!requested.exists());
+}
+
+fn assert_unavailable(resolver: &CascListfileResolver, root: &Path) {
+    assert!(resolver.resolve_bytes(UNAVAILABLE_FDID).is_none());
+    let requested = root.join("source/textures/unavailable.blp");
+    let shared = root.join("shared/textures/unavailable.blp");
+    assert_eq!(resolver.ensure_cached(UNAVAILABLE_FDID, &requested), None);
+    assert!(!shared.exists(), "failure must not create positive output");
+    assert!(!requested.exists(), "failure must not write source output");
 }
