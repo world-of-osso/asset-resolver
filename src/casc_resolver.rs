@@ -306,16 +306,6 @@ pub(crate) fn ensure_file_cached_at_path_with_paths(
     if shared_path.exists() {
         return Some(shared_path);
     }
-    let missing_marker = shared_path.with_extension(format!(
-        "{}.missing",
-        shared_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-    ));
-    if missing_marker.exists() {
-        return None;
-    }
     eprintln!(
         "asset-cache miss: fdid {fdid} not cached at {}, extracting from local CASC",
         shared_path.display()
@@ -327,17 +317,9 @@ pub(crate) fn ensure_file_cached_at_path_with_paths(
                 "asset-cache extraction failed: fdid {fdid} -> {}: {err}",
                 shared_path.display()
             );
-            write_missing_marker(&missing_marker);
             None
         }
     }
-}
-
-fn write_missing_marker(path: &Path) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(path, []);
 }
 
 pub fn resolve_bytes(fdid: u32) -> Option<Vec<u8>> {
