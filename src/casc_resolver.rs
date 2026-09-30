@@ -279,7 +279,12 @@ impl CascState {
 /// Open local CASC (TACT keys, resolution cache) and initialize the installation, as
 /// the first extraction would; later calls return the first call's outcome.
 pub(crate) fn initialize_with_paths(paths: &ResolverPaths) -> Result<(), String> {
-    get_casc(paths)?.ensure_initialized()
+    let casc = get_casc(paths)?;
+    casc.ensure_initialized()?;
+    // Key-aware reads use their own archive index/access state. Warm it too so
+    // encrypted assets do not defer a second initialization to their first read.
+    drop(casc.ensure_local_access()?);
+    Ok(())
 }
 
 pub fn ensure_file_cached_at_path(fdid: u32, out_path: &Path) -> Option<PathBuf> {
