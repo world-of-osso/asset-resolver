@@ -283,7 +283,11 @@ pub(crate) fn initialize_with_paths(paths: &ResolverPaths) -> Result<(), String>
     casc.ensure_initialized()?;
     // Key-aware reads use their own archive index/access state. Warm it too so
     // encrypted assets do not defer a second initialization to their first read.
-    drop(casc.ensure_local_access()?);
+    // Only those reads need it: its failure is reported here and again by each of
+    // them, and does not fail the initialization every other read relies on.
+    if let Err(err) = casc.ensure_local_access() {
+        eprintln!("CASC key-aware archive access unavailable: {err}");
+    }
     Ok(())
 }
 
