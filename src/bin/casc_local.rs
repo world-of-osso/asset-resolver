@@ -5,6 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
+use asset_resolver::casc_resolver::ExtractedFile;
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (fdids, output_dir) = parse_args(&args);
@@ -43,8 +45,20 @@ fn extract_all(fdids: &[u32], output_dir: &Path) -> (u32, u32) {
     let mut fail = 0u32;
     for &fdid in fdids {
         match extract_fdid(fdid, output_dir) {
-            Ok(path) => {
-                eprintln!("Extracted FDID {fdid} -> {}", path.display());
+            Ok(Some(extracted)) => {
+                eprintln!("Extracted FDID {fdid} -> {}", extracted.path.display());
+                if !extracted.missing_keys.is_empty() {
+                    eprintln!(
+                        "FDID {fdid} missing TACT keys (zero-filled): {}",
+                        asset_resolver::casc_resolver::describe_missing_keys(
+                            &extracted.missing_keys
+                        )
+                    );
+                }
+                ok += 1;
+            }
+            Ok(None) => {
+                eprintln!("FDID {fdid} already extracted, skipped");
                 ok += 1;
             }
             Err(err) => {
@@ -56,12 +70,12 @@ fn extract_all(fdids: &[u32], output_dir: &Path) -> (u32, u32) {
     (ok, fail)
 }
 
-fn extract_fdid(fdid: u32, output_dir: &Path) -> Result<PathBuf, String> {
+fn extract_fdid(fdid: u32, output_dir: &Path) -> Result<Option<ExtractedFile>, String> {
     let out_path = output_dir.join(resolve_filename(fdid));
     if out_path.exists() {
-        return Ok(out_path);
+        return Ok(None);
     }
-    asset_resolver::casc_resolver::extract_fdid_to_path(fdid, &out_path)
+    asset_resolver::casc_resolver::extract_fdid_to_path(fdid, &out_path).map(Some)
 }
 
 fn resolve_filename(fdid: u32) -> String {

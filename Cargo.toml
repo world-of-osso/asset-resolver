@@ -16,9 +16,9 @@ casc = [
 binrw = "0.15.1"
 rusqlite = { version = "0.35", features = ["bundled"] }
 tokio = { version = "1", features = ["rt"] }
-cascette-client-storage = { git = "https://github.com/Osso/cascette-rs", rev = "3992ef0fb9a81f10841a763619440a68647611ff", features = ["local-install"], optional = true }
-cascette-crypto = { git = "https://github.com/Osso/cascette-rs", rev = "3992ef0fb9a81f10841a763619440a68647611ff", optional = true }
-cascette-formats = { git = "https://github.com/Osso/cascette-rs", rev = "3992ef0fb9a81f10841a763619440a68647611ff", optional = true }
+cascette-client-storage = { git = "https://github.com/Osso/cascette-rs", rev = "027a1ac34c81b4ec23a0bfa36ea298f6642abe19", features = ["local-install"], optional = true }
+cascette-crypto = { git = "https://github.com/Osso/cascette-rs", rev = "027a1ac34c81b4ec23a0bfa36ea298f6642abe19", optional = true }
+cascette-formats = { git = "https://github.com/Osso/cascette-rs", rev = "027a1ac34c81b4ec23a0bfa36ea298f6642abe19", optional = true }
 
 [[bin]]
 name = "casc-local"
