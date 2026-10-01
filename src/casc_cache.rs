@@ -6,8 +6,7 @@ use std::time::{Instant, UNIX_EPOCH};
 use cascette_crypto::{ContentKey, EncodingKey};
 use rusqlite::{Connection, ErrorCode, OpenFlags};
 
-// 2: resolve only enUS root records (1 took the last record of any locale).
-const SCHEMA_VERSION: i64 = 2;
+use crate::paths::RESOLUTION_SCHEMA_VERSION as SCHEMA_VERSION;
 /// The client is English-only; root blocks of other locales hold files the
 /// enUS install never downloads (e.g. localized map tiles).
 const CLIENT_LOCALE: u32 = cascette_formats::root::LocaleFlags::ENUS;

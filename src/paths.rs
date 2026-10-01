@@ -89,8 +89,15 @@ impl ResolverPaths {
         self.shared_data_root.join(relative)
     }
 
+    /// One directory per schema: clients of different versions sharing a cache root
+    /// would otherwise rebuild each other's cache, and every rebuild rewrites the
+    /// root/encoding files the other version's freshness check reads.
     pub(crate) fn casc_cache_path(&self, product: &str, build_key: &str) -> PathBuf {
-        self.cache_root.join("casc").join(product).join(build_key)
+        self.cache_root
+            .join("casc")
+            .join(product)
+            .join(build_key)
+            .join(format!("schema-{RESOLUTION_SCHEMA_VERSION}"))
     }
 
     pub(crate) fn remap_to_shared_data_path(&self, path: &Path) -> PathBuf {
@@ -103,6 +110,10 @@ impl ResolverPaths {
         path.to_path_buf()
     }
 }
+
+/// Resolution cache layout. 2: resolve only enUS root records (1 took the last record
+/// of any locale).
+pub(crate) const RESOLUTION_SCHEMA_VERSION: i64 = 2;
 
 pub(crate) fn default_paths() -> &'static ResolverPaths {
     DEFAULT_PATHS.get_or_init(|| ResolverPaths::from_config(AssetResolverConfig::default()))
@@ -177,7 +188,7 @@ mod tests {
         );
         assert_eq!(
             paths.casc_cache_path("wow", "build"),
-            PathBuf::from("/tmp/asset-cache/casc/wow/build")
+            PathBuf::from("/tmp/asset-cache/casc/wow/build/schema-2")
         );
     }
 
