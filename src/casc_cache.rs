@@ -6,7 +6,11 @@ use std::time::{Instant, UNIX_EPOCH};
 use cascette_crypto::{ContentKey, EncodingKey};
 use rusqlite::{Connection, ErrorCode, OpenFlags};
 
-const SCHEMA_VERSION: i64 = 1;
+// 2: resolve only enUS root records (1 took the last record of any locale).
+const SCHEMA_VERSION: i64 = 2;
+/// The client is English-only; root blocks of other locales hold files the
+/// enUS install never downloads (e.g. localized map tiles).
+const CLIENT_LOCALE: u32 = cascette_formats::root::LocaleFlags::ENUS;
 type FdidToContentKeyMap = HashMap<u32, ContentKey>;
 type ContentToEncodingKeyMap = HashMap<ContentKey, EncodingKey>;
 
@@ -153,7 +157,7 @@ fn build_resolution_maps(
         .map_err(|e| format!("parse root.bin: {e}"))?;
     let encoding = cascette_formats::encoding::EncodingFile::parse(&enc_data)
         .map_err(|e| format!("parse encoding.bin: {e}"))?;
-    let fdid_to_ck = collect_fdid_to_content_keys(&root);
+    let fdid_to_ck = collect_fdid_to_content_keys(&root.blocks);
     let ck_to_ek = collect_content_to_encoding_keys(&encoding);
     Ok((fdid_to_ck, ck_to_ek))
 }
@@ -162,10 +166,15 @@ fn read_cache_file(path: &Path) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-fn collect_fdid_to_content_keys(root: &cascette_formats::root::RootFile) -> FdidToContentKeyMap {
-    // last-write-wins, matches ContentResolver behavior
+fn collect_fdid_to_content_keys(
+    blocks: &[cascette_formats::root::RootBlock],
+) -> FdidToContentKeyMap {
+    // last-write-wins among client-locale blocks
     let mut fdid_to_ck = HashMap::new();
-    for block in &root.blocks {
+    for block in blocks
+        .iter()
+        .filter(|block| block.header.locale_flags.has(CLIENT_LOCALE))
+    {
         for record in &block.records {
             fdid_to_ck.insert(record.file_data_id.get(), record.content_key);
         }
@@ -339,6 +348,34 @@ mod tests {
         std::fs::write(casc_dir.join("root.bin"), b"root").expect("write root.bin");
         std::fs::write(casc_dir.join("encoding.bin"), b"encoding").expect("write encoding.bin");
         casc_dir
+    }
+
+    #[test]
+    fn content_keys_come_from_client_locale_blocks() {
+        use cascette_crypto::md5::FileDataId;
+        use cascette_formats::root::{ContentFlags, LocaleFlags, RootBlock, RootRecord};
+        // Northshire map tile 604377: the enUS record precedes the koKR one in root.
+        let block = |locale: u32, ckey: [u8; 16]| {
+            let mut block =
+                RootBlock::new(ContentFlags::new(0x0208_0000), LocaleFlags::new(locale));
+            block.add_record(RootRecord::new(
+                FileDataId::new(604377),
+                ContentKey::from_bytes(ckey),
+                None,
+            ));
+            block
+        };
+        let blocks = [
+            block(LocaleFlags::ENUS | LocaleFlags::ENGB, [0x84; 16]),
+            block(LocaleFlags::KOKR, [0x23; 16]),
+        ];
+
+        let fdid_to_ck = collect_fdid_to_content_keys(&blocks);
+
+        assert_eq!(
+            fdid_to_ck.get(&604377),
+            Some(&ContentKey::from_bytes([0x84; 16]))
+        );
     }
 
     #[test]
