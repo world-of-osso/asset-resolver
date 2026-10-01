@@ -442,13 +442,32 @@ fn read_fdid_bytes_by_listfile_path(
         .map_err(|e| format!("CASC read FDID {fdid} via listfile path {path}: {e}"))
 }
 
+/// Writes `data` to a temporary sibling and renames it over `out_path`, so a concurrent
+/// reader that finds `out_path` present always reads the whole file.
 fn write_to_path(out_path: &Path, data: &[u8]) -> Result<(), String> {
+    static NEXT_TEMPORARY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let parent = out_path
         .parent()
         .ok_or_else(|| format!("missing parent for {}", out_path.display()))?;
     std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-    std::fs::write(out_path, data).map_err(|e| format!("write {}: {e}", out_path.display()))?;
-    Ok(())
+    let name = out_path
+        .file_name()
+        .ok_or_else(|| format!("missing file name in {}", out_path.display()))?;
+    let temporary = parent.join(format!(
+        ".{}.{}.{}.partial",
+        name.to_string_lossy(),
+        std::process::id(),
+        NEXT_TEMPORARY.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::write(&temporary, data).map_err(|e| format!("write {}: {e}", temporary.display()))?;
+    std::fs::rename(&temporary, out_path).map_err(|e| {
+        let _ = std::fs::remove_file(&temporary);
+        format!(
+            "rename {} -> {}: {e}",
+            temporary.display(),
+            out_path.display()
+        )
+    })
 }
 
 fn get_casc(paths: &ResolverPaths) -> Result<&'static CascState, String> {
@@ -973,5 +992,53 @@ fn run_async<F: std::future::Future>(fut: F) -> F::Output {
             .build()
             .expect("failed to create tokio runtime")
             .block_on(fut)
+    }
+}
+
+#[cfg(test)]
+mod cache_write_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    /// Two workers extracting models that share a texture: one writes the cache file while
+    /// the other finds it present and decodes it. The reader must only ever see the whole
+    /// file, never a prefix (Twilight Highlands doodads failed with BLP header EOF).
+    #[test]
+    fn concurrent_reader_never_sees_a_partly_written_cache_file() {
+        let dir = std::env::temp_dir().join(format!("asset-resolver-write-{}", std::process::id()));
+        let data = vec![7_u8; 16 << 20];
+        let stop = Arc::new(AtomicBool::new(false));
+        let paths: Vec<PathBuf> = (0..8)
+            .map(|index| dir.join(format!("textures/{index}.blp")))
+            .collect();
+        let reader = {
+            let (stop, paths) = (Arc::clone(&stop), paths.clone());
+            std::thread::spawn(move || {
+                let mut partial = Vec::new();
+                while !stop.load(Ordering::Relaxed) {
+                    for path in &paths {
+                        if let Ok(bytes) = std::fs::read(path)
+                            && bytes.len() != 16 << 20
+                        {
+                            partial.push(bytes.len());
+                        }
+                    }
+                }
+                partial
+            })
+        };
+        for path in &paths {
+            write_to_path(path, &data).unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        let partial = reader.join().unwrap();
+        // Only the eight cache files remain: no temporary file is left behind.
+        let files = std::fs::read_dir(dir.join("textures")).unwrap().count();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(partial, Vec::<usize>::new());
+        assert_eq!(files, 8);
     }
 }
