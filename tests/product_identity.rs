@@ -116,6 +116,27 @@ fn unavailable_pinned_build_cannot_borrow_legacy_or_current_build() {
 }
 
 #[test]
+fn qualified_paths_keep_their_identity_and_cannot_be_relabelled() {
+    let fixture = Fixture::new();
+    let retail = AssetIdentity::new("wow", RETAIL_KEY).unwrap();
+    let forever = AssetIdentity::new("wow_classic_beta", FOREVER_KEY).unwrap();
+    let retail_path = fixture.seed(&retail, "models/1100087.m2", b"retail-authored");
+    let forever_path = fixture.seed(&forever, "models/1100087.m2", b"forever-authored");
+    let resolver = fixture.resolver(forever);
+    assert_eq!(
+        resolver
+            .ensure_cached_checked(1100087, &forever_path)
+            .unwrap(),
+        forever_path
+    );
+    let error = resolver
+        .ensure_cached_checked(1100087, &retail_path)
+        .unwrap_err();
+    assert!(error.contains("does not belong"), "{error}");
+    assert_eq!(fs::read(retail_path).unwrap(), b"retail-authored");
+}
+
+#[test]
 fn authored_identity_rejects_invalid_product_or_build_key() {
     assert!(AssetIdentity::new("../wow", RETAIL_KEY).is_err());
     assert!(AssetIdentity::new("wow", "active").is_err());

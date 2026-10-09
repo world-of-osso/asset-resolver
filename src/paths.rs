@@ -116,16 +116,7 @@ impl ResolverPaths {
         let Some(identity) = &self.identity else {
             return Ok(self.remap_to_shared_data_path(path));
         };
-        let relative = path
-            .strip_prefix(&self.source_data_root)
-            .or_else(|_| path.strip_prefix(&self.shared_data_root))
-            .or_else(|_| path.strip_prefix("data"))
-            .map_err(|_| {
-                format!(
-                    "asset path {} is outside configured data roots",
-                    path.display()
-                )
-            })?;
+        let relative = self.relative_data_path(path)?;
         if relative
             .components()
             .any(|part| !matches!(part, std::path::Component::Normal(_)))
@@ -148,6 +139,18 @@ impl ResolverPaths {
             return Ok(identity.asset_path(&self.shared_data_root, asset));
         }
         Ok(identity.asset_path(&self.shared_data_root, relative))
+    }
+
+    fn relative_data_path<'a>(&self, path: &'a Path) -> Result<&'a Path, String> {
+        path.strip_prefix(&self.source_data_root)
+            .or_else(|_| path.strip_prefix(&self.shared_data_root))
+            .or_else(|_| path.strip_prefix("data"))
+            .map_err(|_| {
+                format!(
+                    "asset path {} is outside configured data roots",
+                    path.display()
+                )
+            })
     }
 
     pub(crate) fn remap_to_shared_data_path(&self, path: &Path) -> PathBuf {
