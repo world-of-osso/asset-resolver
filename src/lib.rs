@@ -3,7 +3,9 @@ pub mod listfile_cache;
 
 mod identity;
 mod paths;
+mod runtime_mode;
 pub use identity::AssetIdentity;
+pub use runtime_mode::AssetRuntimeMode;
 
 #[cfg(feature = "casc")]
 pub mod casc_cache;
@@ -30,6 +32,10 @@ impl CascListfileResolver {
             paths: paths::ResolverPaths::from_config(config),
             listfile: std::sync::OnceLock::new(),
         }
+    }
+
+    pub fn runtime_mode(&self) -> AssetRuntimeMode {
+        self.paths.runtime_mode()
     }
 
     fn listfile(&self) -> &listfile::Listfile {

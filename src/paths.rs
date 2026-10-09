@@ -1,4 +1,4 @@
-use crate::AssetIdentity;
+use crate::{AssetIdentity, AssetRuntimeMode};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -10,11 +10,17 @@ pub struct AssetResolverConfig {
     shared_data_root: Option<PathBuf>,
     cache_root: Option<PathBuf>,
     identity: Option<AssetIdentity>,
+    runtime_mode: AssetRuntimeMode,
 }
 
 impl AssetResolverConfig {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_runtime_mode(mut self, mode: AssetRuntimeMode) -> Self {
+        self.runtime_mode = mode;
+        self
     }
 
     pub fn with_identity(mut self, identity: AssetIdentity) -> Self {
@@ -44,6 +50,7 @@ pub(crate) struct ResolverPaths {
     shared_data_root: PathBuf,
     cache_root: PathBuf,
     identity: Option<AssetIdentity>,
+    runtime_mode: AssetRuntimeMode,
 }
 
 impl ResolverPaths {
@@ -66,6 +73,7 @@ impl ResolverPaths {
             shared_data_root,
             cache_root,
             identity: config.identity,
+            runtime_mode: config.runtime_mode,
         }
     }
 
@@ -106,6 +114,10 @@ impl ResolverPaths {
             .join(product)
             .join(build_key)
             .join(format!("schema-{RESOLUTION_SCHEMA_VERSION}"))
+    }
+
+    pub(crate) fn runtime_mode(&self) -> AssetRuntimeMode {
+        self.runtime_mode
     }
 
     pub(crate) fn identity(&self) -> Option<&AssetIdentity> {

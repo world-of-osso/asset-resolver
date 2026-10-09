@@ -1,5 +1,5 @@
 //! Product/build isolation exercises real cache IO, not M2 or BLP parsing.
-use asset_resolver::{AssetIdentity, AssetResolverConfig, CascListfileResolver};
+use asset_resolver::{AssetIdentity, AssetResolverConfig, AssetRuntimeMode, CascListfileResolver};
 use std::{
     fs,
     path::PathBuf,
@@ -134,6 +134,62 @@ fn qualified_paths_keep_their_identity_and_cannot_be_relabelled() {
         .unwrap_err();
     assert!(error.contains("does not belong"), "{error}");
     assert_eq!(fs::read(retail_path).unwrap(), b"retail-authored");
+}
+
+#[test]
+fn extracted_only_initializes_without_local_casc_and_reads_matching_bytes() {
+    let fixture = Fixture::new();
+    let identity =
+        AssetIdentity::new("wow_classic_beta", "00000000000000000000000000000000").unwrap();
+    let path = fixture.seed(&identity, "models/1100087.m2", b"shipped-forever");
+    let resolver = CascListfileResolver::new(
+        AssetResolverConfig::new()
+            .with_data_root(&fixture.0)
+            .with_shared_data_root(&fixture.0)
+            .with_cache_root(fixture.0.join("cache"))
+            .with_identity(identity)
+            .with_runtime_mode(AssetRuntimeMode::ExtractedOnly),
+    );
+    assert_eq!(resolver.runtime_mode(), AssetRuntimeMode::ExtractedOnly);
+    resolver
+        .initialize()
+        .expect("extracted-only must not open an unavailable local CASC build");
+    let selected = resolver
+        .ensure_cached_checked(1100087, &fixture.0.join("models/1100087.m2"))
+        .unwrap();
+    assert_eq!(selected, path);
+    assert_eq!(fs::read(selected).unwrap(), b"shipped-forever");
+}
+
+#[test]
+fn extracted_only_missing_asset_does_not_attempt_local_casc_or_legacy_bytes() {
+    let fixture = Fixture::new();
+    let identity =
+        AssetIdentity::new("wow_classic_beta", "00000000000000000000000000000000").unwrap();
+    let destination = fixture.0.join("models/1100087.m2");
+    fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    fs::write(&destination, b"legacy").unwrap();
+    let resolver = CascListfileResolver::new(
+        AssetResolverConfig::new()
+            .with_data_root(&fixture.0)
+            .with_shared_data_root(&fixture.0)
+            .with_cache_root(fixture.0.join("cache"))
+            .with_identity(identity)
+            .with_runtime_mode(AssetRuntimeMode::ExtractedOnly),
+    );
+    let error = resolver
+        .ensure_cached_checked(1100087, &destination)
+        .unwrap_err();
+    assert!(error.contains("extracted-only"), "{error}");
+    assert!(
+        error.contains("00000000000000000000000000000000"),
+        "{error}"
+    );
+    assert_eq!(fs::read(destination).unwrap(), b"legacy");
+    assert!(
+        !fixture.0.join("cache").exists(),
+        "runtime must not create a CASC cache"
+    );
 }
 
 #[test]
