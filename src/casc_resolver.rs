@@ -951,6 +951,43 @@ mod installed_build_tests {
         assert_eq!(selected.config.root(), Some(FOREVER_KEY));
     }
 
+    #[test]
+    fn authored_build_reads_pinned_config_even_with_a_different_active_build() {
+        let fixture = Fixture::new();
+        fixture.write_config(RETAIL_KEY, RETAIL_KEY);
+        fixture.write_config(FOREVER_KEY, FOREVER_KEY);
+        std::fs::write(
+            fixture.0.join(".build.info"),
+            format!("Active!DEC:1|Build Key!HEX:16|Product!STRING:0\n1|{RETAIL_KEY}|wow\n"),
+        )
+        .unwrap();
+        let identity = AssetIdentity::new("wow_classic_beta", FOREVER_KEY).unwrap();
+        let paths =
+            ResolverPaths::from_config(crate::AssetResolverConfig::new().with_identity(identity));
+        let selected = read_requested_build(&paths, &fixture.0).unwrap();
+        assert_eq!(selected.product, "wow_classic_beta");
+        assert_eq!(selected.build_key, FOREVER_KEY);
+        assert_eq!(selected.config.root(), Some(FOREVER_KEY));
+    }
+
+    #[test]
+    fn missing_authored_build_does_not_read_the_active_config() {
+        let fixture = Fixture::new();
+        fixture.write_config(RETAIL_KEY, RETAIL_KEY);
+        std::fs::write(
+            fixture.0.join(".build.info"),
+            format!("Active!DEC:1|Build Key!HEX:16|Product!STRING:0\n1|{RETAIL_KEY}|wow\n"),
+        )
+        .unwrap();
+        let identity = AssetIdentity::new("wow_classic_beta", FOREVER_KEY).unwrap();
+        let paths =
+            ResolverPaths::from_config(crate::AssetResolverConfig::new().with_identity(identity));
+        let error = read_requested_build(&paths, &fixture.0)
+            .err()
+            .expect("missing pinned config");
+        assert!(error.contains(FOREVER_KEY), "{error}");
+    }
+
     const KEYRING_KEY: &str = "3ca57fe7319a297346440e4d2a03a0cd";
     const CLASSIC_KEY: &str = "7dba9c25479632aebc53be9d187818e3";
 
