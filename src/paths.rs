@@ -1,3 +1,4 @@
+use crate::AssetIdentity;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -8,11 +9,17 @@ pub struct AssetResolverConfig {
     source_data_root: Option<PathBuf>,
     shared_data_root: Option<PathBuf>,
     cache_root: Option<PathBuf>,
+    identity: Option<AssetIdentity>,
 }
 
 impl AssetResolverConfig {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_identity(mut self, identity: AssetIdentity) -> Self {
+        self.identity = Some(identity);
+        self
     }
 
     pub fn with_data_root(mut self, path: impl Into<PathBuf>) -> Self {
@@ -36,6 +43,7 @@ pub(crate) struct ResolverPaths {
     source_data_root: PathBuf,
     shared_data_root: PathBuf,
     cache_root: PathBuf,
+    identity: Option<AssetIdentity>,
 }
 
 impl ResolverPaths {
@@ -57,6 +65,7 @@ impl ResolverPaths {
             source_data_root,
             shared_data_root,
             cache_root,
+            identity: config.identity,
         }
     }
 
@@ -70,7 +79,6 @@ impl ResolverPaths {
         &self.shared_data_root
     }
 
-    #[cfg(test)]
     pub(crate) fn cache_root(&self) -> &Path {
         &self.cache_root
     }
@@ -98,6 +106,48 @@ impl ResolverPaths {
             .join(product)
             .join(build_key)
             .join(format!("schema-{RESOLUTION_SCHEMA_VERSION}"))
+    }
+
+    pub(crate) fn identity(&self) -> Option<&AssetIdentity> {
+        self.identity.as_ref()
+    }
+
+    pub(crate) fn scoped_cache_path(&self, path: &Path) -> Result<PathBuf, String> {
+        let Some(identity) = &self.identity else {
+            return Ok(self.remap_to_shared_data_path(path));
+        };
+        let relative = path
+            .strip_prefix(&self.source_data_root)
+            .or_else(|_| path.strip_prefix(&self.shared_data_root))
+            .or_else(|_| path.strip_prefix("data"))
+            .map_err(|_| {
+                format!(
+                    "asset path {} is outside configured data roots",
+                    path.display()
+                )
+            })?;
+        if relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err(format!(
+                "invalid relative asset path {}",
+                relative.display()
+            ));
+        }
+        if relative.starts_with("products") {
+            let scoped = identity.asset_root(Path::new(""));
+            let asset = relative.strip_prefix(&scoped).map_err(|_| {
+                format!(
+                    "asset path {} does not belong to {} build {}",
+                    path.display(),
+                    identity.product(),
+                    identity.build_key()
+                )
+            })?;
+            return Ok(identity.asset_path(&self.shared_data_root, asset));
+        }
+        Ok(identity.asset_path(&self.shared_data_root, relative))
     }
 
     pub(crate) fn remap_to_shared_data_path(&self, path: &Path) -> PathBuf {

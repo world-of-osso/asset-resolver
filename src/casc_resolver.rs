@@ -6,8 +6,10 @@
 //! resolution files, and lazily initializes archive indices only when an actual FDID extraction is
 //! needed.
 
+use crate::AssetIdentity;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use binrw::BinRead;
 use cascette_client_storage::index::IndexManager;
@@ -52,7 +54,10 @@ impl From<PartialDecode> for FileContent {
     }
 }
 
-static CASC: OnceLock<Option<CascState>> = OnceLock::new();
+type CascCell = Arc<OnceLock<Result<Arc<CascState>, String>>>;
+type CascNamespace = (PathBuf, Option<AssetIdentity>);
+static CASC: LazyLock<Mutex<HashMap<CascNamespace, CascCell>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 static WOW_INSTALL_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 /// Returns the discovered WoW install root (the directory that contains
@@ -138,6 +143,7 @@ fn candidate_install_paths() -> Vec<PathBuf> {
 }
 
 struct CascState {
+    identity: Option<AssetIdentity>,
     install: Installation,
     keys: TactKeyStore,
     cache: CascResolutionCache,
@@ -306,24 +312,34 @@ pub(crate) fn ensure_file_cached_at_path_with_paths(
     fdid: u32,
     out_path: &Path,
 ) -> Option<PathBuf> {
-    let shared_path = paths.remap_to_shared_data_path(out_path);
-    if shared_path.exists() {
-        return Some(shared_path);
+    match ensure_file_cached_checked_with_paths(paths, listfile, fdid, out_path) {
+        Ok(path) => Some(path),
+        Err(error) => {
+            eprintln!(
+                "asset-cache extraction failed: fdid {fdid} -> {}: {error}",
+                out_path.display()
+            );
+            None
+        }
+    }
+}
+
+pub(crate) fn ensure_file_cached_checked_with_paths(
+    paths: &ResolverPaths,
+    listfile: &Listfile,
+    fdid: u32,
+    out_path: &Path,
+) -> Result<PathBuf, String> {
+    let shared_path = paths.scoped_cache_path(out_path)?;
+    if shared_path.is_file() {
+        return Ok(shared_path);
     }
     eprintln!(
         "asset-cache miss: fdid {fdid} not cached at {}, extracting from local CASC",
         shared_path.display()
     );
-    match extract_fdid_to_path_with_paths(paths, listfile, fdid, &shared_path) {
-        Ok(extracted) => Some(extracted.path),
-        Err(err) => {
-            eprintln!(
-                "asset-cache extraction failed: fdid {fdid} -> {}: {err}",
-                shared_path.display()
-            );
-            None
-        }
-    }
+    extract_fdid_to_path_with_paths(paths, listfile, fdid, &shared_path)
+        .map(|extracted| extracted.path)
 }
 
 pub fn resolve_bytes(fdid: u32) -> Option<Vec<u8>> {
@@ -351,7 +367,7 @@ pub(crate) fn resolve_bytes_with_paths(
         return None;
     }
 
-    match read_fdid_bytes(casc, listfile, fdid) {
+    match read_fdid_bytes(&casc, listfile, fdid) {
         Ok(content) => Some(content.data),
         Err(err) => {
             eprintln!("asset-cache byte resolve failed: fdid {fdid}: {err}");
@@ -378,7 +394,13 @@ fn extract_fdid_to_path_with_paths(
     let casc = get_casc(paths)?;
     casc.ensure_initialized()?;
 
-    let content = read_fdid_bytes(casc, listfile, fdid)?;
+    let content = read_fdid_bytes(&casc, listfile, fdid)?;
+    if paths.identity().is_some() && !content.missing_keys.is_empty() {
+        return Err(format!(
+            "FDID {fdid} has undecodable encrypted chunks: {}",
+            describe_missing_keys(&content.missing_keys)
+        ));
+    }
     write_to_path(out_path, &content.data)?;
     eprintln!("CASC: extracted FDID {fdid} -> {}", out_path.display());
     Ok(ExtractedFile {
@@ -396,7 +418,14 @@ fn read_fdid_bytes(
         Some((_, encoding_key_bytes)) => {
             read_fdid_bytes_by_encoding_key(casc, fdid, encoding_key_bytes)
         }
-        None => read_fdid_bytes_by_listfile_path(casc, listfile, fdid),
+        None => match &casc.identity {
+            Some(identity) => Err(format!(
+                "FDID {fdid} absent from {} build {}",
+                identity.product(),
+                identity.build_key()
+            )),
+            None => read_fdid_bytes_by_listfile_path(casc, listfile, fdid),
+        },
     }?;
     if !content.missing_keys.is_empty() {
         eprintln!(
@@ -470,20 +499,15 @@ fn write_to_path(out_path: &Path, data: &[u8]) -> Result<(), String> {
     })
 }
 
-fn get_casc(paths: &ResolverPaths) -> Result<&'static CascState, String> {
-    CASC.get_or_init(|| match init_casc(paths) {
-        Ok(state) => Some(state),
-        Err(err) => {
-            // Surface init failures instead of swallowing them silently;
-            // every later caller would otherwise just see "CASC not available"
-            // with no clue why bootstrap failed (missing manifest, bad cache,
-            // permission error, etc).
-            eprintln!("CASC init failed: {err}");
-            None
-        }
-    })
-    .as_ref()
-    .ok_or_else(|| "CASC not available".to_string())
+fn get_casc(paths: &ResolverPaths) -> Result<Arc<CascState>, String> {
+    let namespace = (paths.cache_root().to_path_buf(), paths.identity().cloned());
+    let cell = {
+        let mut states = CASC
+            .lock()
+            .map_err(|error| format!("CASC state lock: {error}"))?;
+        Arc::clone(states.entry(namespace).or_default())
+    };
+    cell.get_or_init(|| init_casc(paths).map(Arc::new)).clone()
 }
 
 fn init_casc(paths: &ResolverPaths) -> Result<CascState, String> {
@@ -497,10 +521,10 @@ fn init_casc(paths: &ResolverPaths) -> Result<CascState, String> {
     let data_root_display = data_root.display().to_string();
     let install = Installation::open(data_root).map_err(|e| format!("CASC open: {e}"))?;
 
-    let active_build = read_active_build(install_root)?;
+    let active_build = read_requested_build(paths, install_root)?;
     let keys = load_tact_keys(paths, install_root, &active_build)?;
     let casc_dir = paths.casc_cache_path(&active_build.product, &active_build.build_key);
-    ensure_resolution_cache(paths, install_root, &install, &casc_dir)?;
+    ensure_resolution_cache(paths, install_root, &install, &casc_dir, &active_build)?;
     let cache = CascResolutionCache::open(&casc_dir)?;
 
     eprintln!(
@@ -509,6 +533,7 @@ fn init_casc(paths: &ResolverPaths) -> Result<CascState, String> {
         casc_dir.display()
     );
     Ok(CascState {
+        identity: paths.identity().cloned(),
         install,
         keys,
         cache,
@@ -537,6 +562,7 @@ pub fn open_resolution_cache_for_install(
         install_root,
         &install,
         &casc_dir,
+        &active_build,
     )?;
     CascResolutionCache::open(&casc_dir)
 }
@@ -556,6 +582,7 @@ fn ensure_resolution_cache(
     install_root: &Path,
     install: &Installation,
     casc_dir: &Path,
+    active_build: &ActiveBuild,
 ) -> Result<(), String> {
     if crate::casc_cache::resolution_cache_is_fresh(casc_dir)? {
         return Ok(());
@@ -565,8 +592,7 @@ fn ensure_resolution_cache(
         .map_err(|e| format!("create CASC cache dir {}: {e}", casc_dir.display()))?;
     run_async(install.initialize()).map_err(|e| format!("CASC init for cache bootstrap: {e}"))?;
 
-    let active_build = read_active_build(install_root)?;
-    let keys = load_tact_keys(paths, install_root, &active_build)?;
+    let keys = load_tact_keys(paths, install_root, active_build)?;
     rebuild_resolution_cache(&keys, install, casc_dir, &active_build.config)
 }
 
@@ -665,6 +691,28 @@ fn parse_local_blte(raw_blte: &[u8]) -> Result<BlteFile, String> {
         (),
     )
     .map_err(|e| format!("parse BLTE container: {e}"))
+}
+
+fn read_requested_build(paths: &ResolverPaths, install_root: &Path) -> Result<ActiveBuild, String> {
+    let Some(identity) = paths.identity() else {
+        return read_active_build(install_root);
+    };
+    let config_path = data_config_path(install_root, identity.build_key())?;
+    let file = std::fs::File::open(&config_path).map_err(|error| {
+        format!(
+            "open authored {} build {} config {}: {error}",
+            identity.product(),
+            identity.build_key(),
+            config_path.display()
+        )
+    })?;
+    let config = BuildConfig::parse(file)
+        .map_err(|error| format!("parse {}: {error}", config_path.display()))?;
+    Ok(ActiveBuild {
+        product: identity.product().to_owned(),
+        build_key: identity.build_key().to_owned(),
+        config,
+    })
 }
 
 fn read_active_build(install_root: &Path) -> Result<ActiveBuild, String> {

@@ -1,7 +1,9 @@
 pub mod listfile;
 pub mod listfile_cache;
 
+mod identity;
 mod paths;
+pub use identity::AssetIdentity;
 
 #[cfg(feature = "casc")]
 pub mod casc_cache;
@@ -58,6 +60,30 @@ impl CascListfileResolver {
         {
             let _ = fdid;
             None
+        }
+    }
+
+    /// Cache an asset in this resolver's authored namespace. Missing matching
+    /// builds/files retain their extraction error; unqualified files are never used
+    /// by a resolver configured with an identity.
+    pub fn ensure_cached_checked(
+        &self,
+        fdid: u32,
+        out_path: &std::path::Path,
+    ) -> Result<std::path::PathBuf, String> {
+        #[cfg(feature = "casc")]
+        {
+            return casc_resolver::ensure_file_cached_checked_with_paths(
+                &self.paths,
+                self.listfile(),
+                fdid,
+                out_path,
+            );
+        }
+        #[cfg(not(feature = "casc"))]
+        {
+            let _ = (fdid, out_path);
+            Err("asset-resolver was built without the casc feature".to_owned())
         }
     }
 
