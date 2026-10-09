@@ -71,6 +71,11 @@ static WOW_INSTALL_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 /// A candidate is accepted only if `<root>/Data/data` exists (the directory
 /// holding `.idx`/archive blobs), to avoid matching a non-WoW directory.
 pub fn wow_install_path() -> Option<&'static Path> {
+    crate::guard_casc_access(
+        crate::runtime_mode::process_runtime_mode(),
+        "WoW install discovery",
+    )
+    .ok()?;
     WOW_INSTALL_PATH
         .get_or_init(discover_wow_install_path)
         .as_deref()
@@ -285,6 +290,9 @@ impl CascState {
 /// Open local CASC (TACT keys, resolution cache) and initialize the installation, as
 /// the first extraction would; later calls return the first call's outcome.
 pub(crate) fn initialize_with_paths(paths: &ResolverPaths) -> Result<(), String> {
+    if paths.runtime_mode() == crate::AssetRuntimeMode::ExtractedOnly {
+        return Ok(());
+    }
     let casc = get_casc(paths)?;
     casc.ensure_initialized()?;
     // Key-aware reads use their own archive index/access state. Warm it too so
@@ -298,30 +306,7 @@ pub(crate) fn initialize_with_paths(paths: &ResolverPaths) -> Result<(), String>
 }
 
 pub fn ensure_file_cached_at_path(fdid: u32, out_path: &Path) -> Option<PathBuf> {
-    ensure_file_cached_at_path_with_paths(
-        crate::paths::default_paths(),
-        crate::listfile::get_default(),
-        fdid,
-        out_path,
-    )
-}
-
-pub(crate) fn ensure_file_cached_at_path_with_paths(
-    paths: &ResolverPaths,
-    listfile: &Listfile,
-    fdid: u32,
-    out_path: &Path,
-) -> Option<PathBuf> {
-    match ensure_file_cached_checked_with_paths(paths, listfile, fdid, out_path) {
-        Ok(path) => Some(path),
-        Err(error) => {
-            eprintln!(
-                "asset-cache extraction failed: fdid {fdid} -> {}: {error}",
-                out_path.display()
-            );
-            None
-        }
-    }
+    crate::CascListfileResolver::default().ensure_cached(fdid, out_path)
 }
 
 pub(crate) fn ensure_file_cached_checked_with_paths(
@@ -334,6 +319,9 @@ pub(crate) fn ensure_file_cached_checked_with_paths(
     if shared_path.is_file() {
         return Ok(shared_path);
     }
+    if paths.runtime_mode() == crate::AssetRuntimeMode::ExtractedOnly {
+        return Err(paths.missing_extracted_asset(fdid, &shared_path));
+    }
     eprintln!(
         "asset-cache miss: fdid {fdid} not cached at {}, extracting from local CASC",
         shared_path.display()
@@ -344,6 +332,11 @@ pub(crate) fn ensure_file_cached_checked_with_paths(
 }
 
 pub fn resolve_bytes(fdid: u32) -> Option<Vec<u8>> {
+    crate::guard_casc_access(
+        crate::runtime_mode::process_runtime_mode(),
+        "raw CASC byte resolution",
+    )
+    .ok()?;
     resolve_bytes_with_paths(
         crate::paths::default_paths(),
         crate::listfile::get_default(),
@@ -378,6 +371,10 @@ pub(crate) fn resolve_bytes_with_paths(
 }
 
 pub fn extract_fdid_to_path(fdid: u32, out_path: &Path) -> Result<ExtractedFile, String> {
+    crate::guard_casc_access(
+        crate::runtime_mode::process_runtime_mode(),
+        "direct CASC extraction",
+    )?;
     extract_fdid_to_path_with_paths(
         crate::paths::default_paths(),
         crate::listfile::get_default(),
@@ -501,6 +498,7 @@ fn write_to_path(out_path: &Path, data: &[u8]) -> Result<(), String> {
 }
 
 fn get_casc(paths: &ResolverPaths) -> Result<Arc<CascState>, String> {
+    crate::guard_casc_access(paths.runtime_mode(), "open CASC state")?;
     let namespace = (paths.cache_root().to_path_buf(), paths.identity().cloned());
     let cell = {
         let mut states = CASC
@@ -544,6 +542,10 @@ fn init_casc(paths: &ResolverPaths) -> Result<CascState, String> {
 }
 
 pub fn casc_cache_dir_for_install(install_root: &Path) -> Result<PathBuf, String> {
+    crate::guard_casc_access(
+        crate::runtime_mode::process_runtime_mode(),
+        "read install build for cache path",
+    )?;
     let active_build = read_active_build(install_root)?;
     Ok(crate::paths::casc_cache_path(
         &active_build.product,
@@ -554,6 +556,10 @@ pub fn casc_cache_dir_for_install(install_root: &Path) -> Result<PathBuf, String
 pub fn open_resolution_cache_for_install(
     install_root: &Path,
 ) -> Result<CascResolutionCache, String> {
+    crate::guard_casc_access(
+        crate::runtime_mode::process_runtime_mode(),
+        "open install resolution cache",
+    )?;
     let data_root = install_root.join("Data");
     let install = Installation::open(data_root).map_err(|e| format!("CASC open: {e}"))?;
     let active_build = read_active_build(install_root)?;
@@ -569,6 +575,10 @@ pub fn open_resolution_cache_for_install(
 }
 
 pub fn refresh_resolution_cache_for_install(install_root: &Path) -> Result<PathBuf, String> {
+    crate::guard_casc_access(
+        crate::runtime_mode::process_runtime_mode(),
+        "refresh install resolution cache",
+    )?;
     let data_root = install_root.join("Data");
     let install = Installation::open(data_root).map_err(|e| format!("CASC open: {e}"))?;
     let active_build = read_active_build(install_root)?;

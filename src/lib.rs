@@ -5,7 +5,10 @@ mod identity;
 mod paths;
 mod runtime_mode;
 pub use identity::AssetIdentity;
-pub use runtime_mode::AssetRuntimeMode;
+pub use runtime_mode::{
+    AssetRuntimeMode, configure_runtime_mode_from_env, forbidden_casc_access_count,
+    guard_casc_access, set_casc_access_hook,
+};
 
 #[cfg(feature = "casc")]
 pub mod casc_cache;
@@ -40,7 +43,7 @@ impl CascListfileResolver {
     }
 
     pub fn runtime_mode(&self) -> AssetRuntimeMode {
-        self.paths.runtime_mode()
+        runtime_mode::effective_runtime_mode(self.paths.runtime_mode())
     }
 
     fn listfile(&self) -> &listfile::Listfile {
@@ -53,6 +56,9 @@ impl CascListfileResolver {
     /// indices can take seconds. Only resolvers with the same cache root and authored
     /// identity reuse this initialized state.
     pub fn initialize(&self) -> Result<(), String> {
+        if self.runtime_mode() == AssetRuntimeMode::ExtractedOnly {
+            return Ok(());
+        }
         #[cfg(feature = "casc")]
         {
             return casc_resolver::initialize_with_paths(&self.paths);
@@ -64,6 +70,10 @@ impl CascListfileResolver {
     }
 
     pub fn resolve_bytes(&self, fdid: u32) -> Option<Vec<u8>> {
+        if self.runtime_mode() == AssetRuntimeMode::ExtractedOnly {
+            guard_casc_access(self.runtime_mode(), &format!("resolve_bytes FDID {fdid}"))
+                .expect("raw CASC bytes requested in extracted-only mode");
+        }
         #[cfg(feature = "casc")]
         {
             return casc_resolver::resolve_bytes_with_paths(&self.paths, self.listfile(), fdid);
@@ -83,6 +93,13 @@ impl CascListfileResolver {
         fdid: u32,
         out_path: &std::path::Path,
     ) -> Result<std::path::PathBuf, String> {
+        let expected = self.cache_path(out_path)?;
+        if expected.is_file() {
+            return Ok(expected);
+        }
+        if self.runtime_mode() == AssetRuntimeMode::ExtractedOnly {
+            return Err(self.paths.missing_extracted_asset(fdid, &expected));
+        }
         #[cfg(feature = "casc")]
         {
             return casc_resolver::ensure_file_cached_checked_with_paths(
@@ -104,19 +121,15 @@ impl CascListfileResolver {
         fdid: u32,
         out_path: &std::path::Path,
     ) -> Option<std::path::PathBuf> {
-        #[cfg(feature = "casc")]
-        {
-            return casc_resolver::ensure_file_cached_at_path_with_paths(
-                &self.paths,
-                self.listfile(),
-                fdid,
-                out_path,
-            );
-        }
-        #[cfg(not(feature = "casc"))]
-        {
-            let _ = (fdid, out_path);
-            None
+        match self.ensure_cached_checked(fdid, out_path) {
+            Ok(path) => Some(path),
+            Err(error) if self.runtime_mode() == AssetRuntimeMode::ExtractedOnly => {
+                panic!("{error}");
+            }
+            Err(error) => {
+                eprintln!("asset-cache extraction failed: {error}");
+                None
+            }
         }
     }
 

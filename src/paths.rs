@@ -117,7 +117,25 @@ impl ResolverPaths {
     }
 
     pub(crate) fn runtime_mode(&self) -> AssetRuntimeMode {
-        self.runtime_mode
+        crate::runtime_mode::effective_runtime_mode(self.runtime_mode)
+    }
+
+    pub(crate) fn missing_extracted_asset(&self, fdid: u32, expected: &Path) -> String {
+        let identity = self
+            .identity
+            .as_ref()
+            .map(|identity| {
+                format!(
+                    " product {} build {}",
+                    identity.product(),
+                    identity.build_key()
+                )
+            })
+            .unwrap_or_default();
+        format!(
+            "missing extracted-only asset FDID {fdid}{identity} at {}",
+            expected.display()
+        )
     }
 
     pub(crate) fn identity(&self) -> Option<&AssetIdentity> {
