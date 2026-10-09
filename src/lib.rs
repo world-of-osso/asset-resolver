@@ -34,6 +34,11 @@ impl CascListfileResolver {
         }
     }
 
+    /// The destination in this resolver's namespace, without reading any asset.
+    pub fn cache_path(&self, destination: &std::path::Path) -> Result<std::path::PathBuf, String> {
+        self.paths.scoped_cache_path(destination)
+    }
+
     pub fn runtime_mode(&self) -> AssetRuntimeMode {
         self.paths.runtime_mode()
     }
