@@ -37,9 +37,10 @@ impl CascListfileResolver {
             .get_or_init(|| listfile::Listfile::from_paths(&self.paths))
     }
 
-    /// Initialize the process-wide local CASC state before the first extraction.
+    /// Initialize this resolver's local CASC namespace before the first extraction.
     /// Call from a worker thread: loading TACT keys, resolution tables and archive
-    /// indices can take seconds. Later resolvers reuse this initialized state.
+    /// indices can take seconds. Only resolvers with the same cache root and authored
+    /// identity reuse this initialized state.
     pub fn initialize(&self) -> Result<(), String> {
         #[cfg(feature = "casc")]
         {

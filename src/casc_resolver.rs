@@ -340,6 +340,7 @@ pub(crate) fn ensure_file_cached_checked_with_paths(
     );
     extract_fdid_to_path_with_paths(paths, listfile, fdid, &shared_path)
         .map(|extracted| extracted.path)
+        .map_err(|error| format!("FDID {fdid} at {}: {error}", shared_path.display()))
 }
 
 pub fn resolve_bytes(fdid: u32) -> Option<Vec<u8>> {
