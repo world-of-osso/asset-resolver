@@ -76,12 +76,13 @@ def read_lookup(data):
     rows = {}
     for section in range(sections):
         key, start, count, strings, _, ids, relations, sparse, copies = unpack(data, '<Q8I', 204 + section * 40)
-        if strings or relations or sparse or ids != count * 4:
+        if relations or sparse or ids != count * 4:
             raise ValueError('unsupported TactKeyLookup section')
         payload = take(data, start, count * 8)
         if key and count and not any(payload):
             raise ValueError('unreadable TactKeyLookup section')
-        id_start = start + count * 8
+        take(data, start + count * 8, strings)
+        id_start = start + count * 8 + strings
         for index in range(count):
             row = unpack(data, '<I', id_start + index * 4)[0]
             rows[row] = f'{unpack(payload, "<Q", index * 8)[0]:016X}'

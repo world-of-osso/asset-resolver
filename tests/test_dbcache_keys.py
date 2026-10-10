@@ -63,10 +63,10 @@ class DBCacheKeysTests(unittest.TestCase):
         struct.pack_into('<6I', data, 136, 1, 1, 8, 0, 0xAFC190D1, 0x4983962C)
         struct.pack_into('<H', data, 172, 4)
         struct.pack_into('<I', data, 200, 1)
-        struct.pack_into('<Q8I', data, 204, 0, 272, 1, 0, 280, 4, 0, 0, 0)
+        struct.pack_into('<Q8I', data, 204, 0, 272, 1, 2, 280, 4, 0, 0, 0)
         struct.pack_into('<HHIIIII', data, 248, 0, 64, 0, 0, 0, 0, 0)
         struct.pack_into('<Q', data, 272, 0x1122334455667788)
-        struct.pack_into('<I', data, 280, 7)
+        struct.pack_into('<I', data, 282, 7)
         self.assertEqual(loader.read_lookup(bytes(data)), {7: '1122334455667788'})
 
 
