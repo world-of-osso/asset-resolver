@@ -225,4 +225,3 @@ impl crate::CascFormat for KeyringConfig {
         Ok(self.build())
     }
 }
-
