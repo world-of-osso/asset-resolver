@@ -20,6 +20,9 @@ cascette-client-storage = { git = "https://github.com/Osso/cascette-rs", rev = "
 cascette-crypto = { git = "https://github.com/Osso/cascette-rs", rev = "027a1ac34c81b4ec23a0bfa36ea298f6642abe19", optional = true }
 cascette-formats = { git = "https://github.com/Osso/cascette-rs", rev = "027a1ac34c81b4ec23a0bfa36ea298f6642abe19", optional = true }
 
+[patch."https://github.com/Osso/cascette-rs"]
+cascette-formats = { path = "vendor/cascette-formats" }
+
 [[bin]]
 name = "casc-local"
 path = "src/bin/casc_local.rs"

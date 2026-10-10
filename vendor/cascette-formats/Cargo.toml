@@ -1,0 +1,50 @@
+[package]
+name = "cascette-formats"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+authors = ["Daniel S. Reichenbach <daniel@kogito.network>"]
+repository = "https://github.com/wowemulation-dev/cascette-rs"
+description = "File format parsers and builders for NGDP/CASC system"
+readme = "README.md"
+keywords = ["ngdp", "casc", "blizzard", "warcraft", "bpsv"]
+categories = ["parser-implementations", "encoding", "game-development"]
+
+[dependencies]
+# Error handling
+thiserror = "2.0"
+
+# Binary format handling
+binrw = "0.15"
+
+# Utilities
+hex = "0.4"
+md5 = "0.8"
+
+# Salsa20/20 core for BLTE's 128-bit-key, 4/8-byte-IV variant.
+salsa20 = "0.10"
+
+# Compression
+flate2 = "1.1"
+lz4_flex = "0.12"
+
+# Internal dependencies
+cascette-crypto = { git = "https://github.com/Osso/cascette-rs", rev = "027a1ac34c81b4ec23a0bfa36ea298f6642abe19" }
+
+# JSON parsing for product configs
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+# Testing
+pretty_assertions = "1.4"
+walkdir = "2.5"
+tempfile = "3.24"
+proptest = "1.10"
+rand = "0.10"
+
+[features]
+default = []
+
+
