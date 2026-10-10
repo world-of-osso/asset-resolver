@@ -173,6 +173,65 @@ struct LocalArchiveAccess {
     archives: ArchiveManager,
 }
 
+/// Offline extraction from authenticated frozen resolution keys, independent of active install metadata.
+/// Callers verify the frozen resolution receipt and each returned content-key hash before publication.
+pub struct FrozenArchiveReader {
+    local: LocalArchiveAccess,
+    keys: TactKeyStore,
+}
+
+impl FrozenArchiveReader {
+    pub fn open(archive_dir: &Path, key_file: Option<&Path>) -> Result<Self, String> {
+        crate::guard_casc_access(
+            crate::runtime_mode::process_runtime_mode(),
+            "open frozen local CASC archives",
+        )?;
+        let mut indices = IndexManager::new(archive_dir);
+        let mut archives = ArchiveManager::new(archive_dir);
+        run_async(indices.load_all())
+            .map_err(|error| format!("load frozen CASC indices: {error}"))?;
+        run_async(archives.open_all())
+            .map_err(|error| format!("open frozen CASC archives: {error}"))?;
+        let mut keys = TactKeyStore::new();
+        if let Some(path) = key_file {
+            let text = std::fs::read_to_string(path)
+                .map_err(|error| format!("TACT keys {}: {error}", path.display()))?;
+            keys.load_from_txt(&text);
+        }
+        Ok(Self {
+            local: LocalArchiveAccess { indices, archives },
+            keys,
+        })
+    }
+
+    pub fn read_encoding_key(&self, key: [u8; 16]) -> Result<Vec<u8>, String> {
+        crate::guard_casc_access(
+            crate::runtime_mode::process_runtime_mode(),
+            "read frozen local CASC bytes",
+        )?;
+        let key = EncodingKey::from_bytes(key);
+        let entry =
+            self.local.indices.lookup(&key).ok_or_else(|| {
+                format!("Frozen source encoding key {key}: archive location absent")
+            })?;
+        let raw = self
+            .local
+            .archives
+            .read_raw(entry.archive_id(), entry.archive_offset(), entry.size)
+            .map_err(|error| format!("Frozen source encoding key {key}: {error}"))?;
+        let decoded = parse_local_blte(&raw)?
+            .decompress_zeroing_missing_keys(&self.keys)
+            .map_err(|error| format!("Frozen source encoding key {key}: {error}"))?;
+        if !decoded.missing_keys.is_empty() {
+            return Err(format!(
+                "Frozen source encoding key {key}: undecodable encrypted chunks: {}",
+                describe_missing_keys(&decoded.missing_keys)
+            ));
+        }
+        Ok(decoded.data)
+    }
+}
+
 struct ActiveBuild {
     product: String,
     build_key: String,
@@ -1102,6 +1161,39 @@ mod cache_write_tests {
     /// Two workers extracting models that share a texture: one writes the cache file while
     /// the other finds it present and decodes it. The reader must only ever see the whole
     /// file, never a prefix (Twilight Highlands doodads failed with BLP header EOF).
+    #[test]
+    fn model_asset_frozen_archives_remain_offline_only() {
+        if std::env::var_os("FROZEN_ARCHIVE_POLICY_CHILD").is_some() {
+            let error =
+                FrozenArchiveReader::open(Path::new("/absent-frozen-archive-fixture"), None)
+                    .err()
+                    .expect("Extracted-only opened local archives");
+            assert!(
+                error.contains("extracted-only forbids CASC access"),
+                "{error}"
+            );
+            assert_eq!(crate::forbidden_casc_access_count(), 1);
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "casc_resolver::cache_write_tests::model_asset_frozen_archives_remain_offline_only",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env("GAME_ENGINE_ASSET_MODE", "extracted-only")
+            .env("FROZEN_ARCHIVE_POLICY_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn concurrent_reader_never_sees_a_partly_written_cache_file() {
         let dir = std::env::temp_dir().join(format!("asset-resolver-write-{}", std::process::id()));

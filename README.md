@@ -34,6 +34,17 @@ approved contract lives in `docs/specs/product-isolated-model-assets.md` in the
 engine repository. Depot stages a branch checkout using
 `DEPOT_SIBLING_ASSET_RESOLVER=/home/osso/.worktrees/asset-resolver`.
 
+## Frozen offline extraction
+
+`FrozenArchiveReader::open(archive_dir, key_file)` reads local archives by encoding
+key without active install/config/root selection. Offline importers authenticate
+a frozen product/build resolution snapshot, obtain its encoding keys, and verify
+each returned payload against its content key before publishing. This permits
+continued extraction after an install update removes the old build config.
+Missing archive locations and encrypted chunks error; zero-filled bytes are never
+accepted. Existing CASC guards forbid this reader in extracted-only runtime mode.
+It is an explicit offline source, not a runtime or legacy fallback.
+
 ## Focused tests
 
 `cargo test --locked --test product_identity` exercises real scoped cache reads,
