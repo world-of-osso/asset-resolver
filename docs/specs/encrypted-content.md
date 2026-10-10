@@ -25,6 +25,9 @@ The CASC resolver decrypts encrypted BLTE chunks with every locally available TA
 ## Tests asserting this spec
 
 - `tests/blte_iv.rs` — eight-byte encrypted container, nonzero chunk-index XOR, four-byte IV zero-padding, invalid/truncated IVs; deterministic synthetic-key vectors.
+- `tests/blte_iv8_local.rs` — authentic Retail 12.1.0.69933 FDID 3182457, one of the recovered IV8 failures. Reads EKey `910058c8537e36682eb1f2a24c74178e` directly from local archives, asserts an encrypted IV8 chunk, complete decode without missing keys, 163908 bytes and CKey `8e085d4946b784ca77ad1be1f24e52c9`. Ignored by default because archives and keys are external; explicit invocation fails if either is unavailable. No real keys or game bytes are committed.
+
+Run the local regression with `CASC_IV8_INSTALL="/syncthing/World of Warcraft" CASC_IV8_KEYS="../game-engine/data/tactkeys/WoW.txt" cargo test --test blte_iv8_local -- --ignored --nocapture`. Agents wrap Cargo with game-engine's `scripts/agent/agent-run blteiv`.
 
 - `src/casc_resolver.rs` — `selected_build_keyring_is_loaded_as_tact_keys`, `product_without_keyring_loads_no_keyring_keys`, `keyring_for_other_build_is_an_error`.
 - cascette-rs `crates/cascette-formats/src/blte/mod.rs` — `missing_key_tests`.
