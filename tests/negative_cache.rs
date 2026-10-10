@@ -15,8 +15,11 @@ const STAGE_ENV: &str = "ASSET_RESOLVER_NEGATIVE_CACHE_STAGE";
 const ROOT_ENV: &str = "ASSET_RESOLVER_NEGATIVE_CACHE_ROOT";
 const TEXTURE_FDID: u32 = 1244035;
 const UNAVAILABLE_FDID: u32 = u32::MAX;
-const COMMUNITY_LISTFILE: &str =
-    "/syncthing/Sync/Projects/world-of-osso/game-engine/data/community-listfile.csv";
+/// The sibling game-engine checkout's local listfile, relative to this crate.
+const COMMUNITY_LISTFILE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../game-engine/data/community-listfile.csv"
+);
 
 struct Fixture(PathBuf);
 
