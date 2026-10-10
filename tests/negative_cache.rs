@@ -152,7 +152,7 @@ fn recover_local_texture(
     assert!(bytes.starts_with(b"BLP2"), "local FDID must be BLP2");
     assert_eq!(
         resolver.ensure_cached(TEXTURE_FDID, requested),
-        Some(shared.to_path_buf()),
+        Ok(Some(shared.to_path_buf())),
         "persisted empty marker must not block locally available texture"
     );
     assert_eq!(fs::read(shared).expect("acquired shared texture"), bytes);
@@ -167,7 +167,7 @@ fn preserve_positive_cache(resolver: &CascListfileResolver, root: &Path) {
     let before = fs::metadata(&shared).expect("positive file state");
     assert_eq!(
         resolver.ensure_cached(TEXTURE_FDID, &requested),
-        Some(shared.clone())
+        Ok(Some(shared.clone()))
     );
     let after = fs::metadata(&shared).expect("positive file state after read");
     assert_eq!(fs::read(&shared).expect("positive bytes"), bytes);
@@ -186,7 +186,10 @@ fn assert_unavailable(resolver: &CascListfileResolver, root: &Path) {
     assert!(resolver.resolve_bytes(UNAVAILABLE_FDID).is_none());
     let requested = root.join("source/textures/unavailable.blp");
     let shared = root.join("shared/textures/unavailable.blp");
-    assert_eq!(resolver.ensure_cached(UNAVAILABLE_FDID, &requested), None);
+    assert_eq!(
+        resolver.ensure_cached(UNAVAILABLE_FDID, &requested),
+        Ok(None)
+    );
     assert!(!shared.exists(), "failure must not create positive output");
     assert!(!requested.exists(), "failure must not write source output");
 }

@@ -116,19 +116,19 @@ impl CascListfileResolver {
         }
     }
 
+    /// Legacy optional extraction: local CASC failures still log and return None.
+    /// Extracted-only misses must propagate the checked error, never panic or omit it.
     pub fn ensure_cached(
         &self,
         fdid: u32,
         out_path: &std::path::Path,
-    ) -> Option<std::path::PathBuf> {
+    ) -> Result<Option<std::path::PathBuf>, String> {
         match self.ensure_cached_checked(fdid, out_path) {
-            Ok(path) => Some(path),
-            Err(error) if self.runtime_mode() == AssetRuntimeMode::ExtractedOnly => {
-                panic!("{error}");
-            }
+            Ok(path) => Ok(Some(path)),
+            Err(error) if self.runtime_mode() == AssetRuntimeMode::ExtractedOnly => Err(error),
             Err(error) => {
                 eprintln!("asset-cache extraction failed: {error}");
-                None
+                Ok(None)
             }
         }
     }

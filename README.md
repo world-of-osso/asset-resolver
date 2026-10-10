@@ -22,7 +22,13 @@ explicit-identity FDID cannot borrow the installation's listfile-path lookup.
 Consumers must retain the namespace in parsed-model, decoded-texture and GPU
 material keys. This library does not infer a model's author from race or FDID.
 
-Existing non-model consumers without an identity retain their current interface.
+Legacy `ensure_cached` and `ensure_file_cached_at_path` return
+`Result<Option<PathBuf>, String>`. Local-CASC hits return `Ok(Some(path))` and
+extraction failures still log and return `Ok(None)`. Extracted-only misses return
+exactly the checked API's `Err(String)` (mode/FDID/authored product-build/path),
+without panicking. Callers must propagate this error through worker completions
+or log it explicitly. Ordinary extracted-file misses do not enter CASC; the
+forbidden-entry counter and hook ordering are unchanged.
 The game-engine full-chain migration is not implemented by this API alone; its
 approved contract lives in `docs/specs/product-isolated-model-assets.md` in the
 engine repository. Depot stages a branch checkout using

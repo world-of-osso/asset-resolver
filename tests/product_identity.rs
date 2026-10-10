@@ -65,11 +65,13 @@ fn same_fdids_and_full_companion_chain_coexist_in_one_process() {
         for _ in 0..2 {
             let selected = retail_resolver
                 .ensure_cached(1100087, &unqualified)
+                .unwrap()
                 .unwrap();
             assert_eq!(selected, retail_path);
             assert_eq!(fs::read(selected).unwrap(), b"retail-authored");
             let selected = forever_resolver
                 .ensure_cached(1100087, &unqualified)
+                .unwrap()
                 .unwrap();
             assert_eq!(selected, forever_path);
             assert_eq!(fs::read(selected).unwrap(), b"forever-authored");
@@ -91,6 +93,7 @@ fn builds_of_same_product_do_not_share_cached_bytes() {
         let path = fixture
             .resolver(identity)
             .ensure_cached(1100258, &fixture.0.join(relative))
+            .unwrap()
             .unwrap();
         assert_eq!(fs::read(path).unwrap(), expected);
     }
@@ -158,6 +161,12 @@ fn extracted_only_initializes_without_local_casc_and_reads_matching_bytes() {
         .ensure_cached_checked(1100087, &fixture.0.join("models/1100087.m2"))
         .unwrap();
     assert_eq!(selected, path);
+    assert_eq!(
+        resolver
+            .ensure_cached(1100087, &fixture.0.join("models/1100087.m2"))
+            .unwrap(),
+        Some(path)
+    );
     assert_eq!(fs::read(selected).unwrap(), b"shipped-forever");
 }
 
@@ -180,6 +189,10 @@ fn extracted_only_missing_asset_does_not_attempt_local_casc_or_legacy_bytes() {
     let error = resolver
         .ensure_cached_checked(1100087, &destination)
         .unwrap_err();
+    assert_eq!(
+        resolver.ensure_cached(1100087, &destination).unwrap_err(),
+        error
+    );
     assert!(error.contains("extracted-only"), "{error}");
     assert!(
         error.contains("00000000000000000000000000000000"),

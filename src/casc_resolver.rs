@@ -305,7 +305,7 @@ pub(crate) fn initialize_with_paths(paths: &ResolverPaths) -> Result<(), String>
     Ok(())
 }
 
-pub fn ensure_file_cached_at_path(fdid: u32, out_path: &Path) -> Option<PathBuf> {
+pub fn ensure_file_cached_at_path(fdid: u32, out_path: &Path) -> Result<Option<PathBuf>, String> {
     crate::CascListfileResolver::default().ensure_cached(fdid, out_path)
 }
 
