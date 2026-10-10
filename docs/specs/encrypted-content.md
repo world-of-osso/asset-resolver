@@ -9,6 +9,7 @@ The CASC resolver decrypts encrypted BLTE chunks with every locally available TA
 - [x] A product row with an empty `KeyRing` loads no keyring keys; a missing `.build.info` row for the selected build, or an unreadable/invalid keyring, is an error.
 - [x] Zero-fill an encrypted chunk whose key is unknown at its declared decompressed size (CascLib `CASC_OVERCOME_ENCRYPTED`), warn with each key name, chunk index, offset and size, and return them in `ExtractedFile::missing_keys`.
 - [x] Fail on chunk MD5 mismatch or malformed chunk headers instead of zero-filling.
+- [x] Accept encrypted BLTE IV lengths of four or eight bytes. For Salsa20, preserve all IV bytes, zero-pad four-byte IVs to eight, and XOR the chunk index into the first four bytes. Reject other IV lengths and truncated headers.
 - [ ] Decode root and encoding files strictly; a missing key there is an error.
 
 ## How it works
@@ -19,8 +20,11 @@ The CASC resolver decrypts encrypted BLTE chunks with every locally available TA
 
 - `src/casc_resolver.rs` — key loading, partial BLTE decode, `ExtractedFile`, missing-key warning.
 - `src/bin/casc_local.rs` — prints missing keys per extracted FDID.
+- [`vendor/README.md`](../../vendor/README.md) — pinned formats patch, CascLib reference, provenance and retirement criteria.
 
 ## Tests asserting this spec
+
+- `tests/blte_iv.rs` — eight-byte encrypted container, nonzero chunk-index XOR, four-byte IV zero-padding, invalid/truncated IVs; deterministic synthetic-key vectors.
 
 - `src/casc_resolver.rs` — `selected_build_keyring_is_loaded_as_tact_keys`, `product_without_keyring_loads_no_keyring_keys`, `keyring_for_other_build_is_an_error`.
 - cascette-rs `crates/cascette-formats/src/blte/mod.rs` — `missing_key_tests`.

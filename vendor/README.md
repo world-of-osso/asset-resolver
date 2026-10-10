@@ -14,7 +14,9 @@ cipher-type byte, and decrypt Salsa20 through RustCrypto's existing 0.10 core.
 BLTE uses the 128-bit-key tau constants, a repeated key, a zero-padded eight-byte
 nonce, and frame-index XOR of the first four bytes. Eight-byte IVs retain their
 upper bytes. Four-byte encryption builders and ARC4 behavior are unchanged.
-No key store or real TACT key material is vendored.
+No key store or real TACT key material is vendored. Upstream CDN keyring
+fixtures, their integration tests, and keyring fixture unit tests are omitted
+because they contain real keys. Other source files are preserved unchanged.
 
 Reference: [CascLib `CascDecrypt`](https://github.com/ladislav-zezula/CascLib/blob/master/src/CascDecrypt.cpp)
 explicitly checks `pbInBuffer[0] != 4 && pbInBuffer[0] != 8`, zeroes `Vector[8]`,
