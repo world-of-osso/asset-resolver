@@ -139,6 +139,7 @@ fn patch_changes_extracted_bytes_and_cache_namespace_without_relabelling_receipt
             .unwrap(),
         published
     );
+    fs::create_dir_all(data.join("textures")).unwrap();
     fs::write(data.join("textures/120191.blp"), b"unqualified-decoy").unwrap();
     let extracted = authored
         .ensure_cached_checked(120191, &data.join("textures/120191.blp"))
