@@ -2,7 +2,7 @@
 //!
 //! Reads directly from a local WoW installation discovered via
 //! [`wow_install_path`]. On first use, reads the requested product from
-//! `.product.db` and its build config to find root/encoding keys, loads cached
+//! the active `.build.info` row and its build config to find root/encoding keys, loads cached
 //! resolution files, and lazily initializes archive indices only when an actual FDID extraction is
 //! needed.
 
@@ -381,18 +381,9 @@ pub(crate) fn ensure_file_cached_checked_with_paths(
     if paths.runtime_mode() == crate::AssetRuntimeMode::ExtractedOnly {
         return Err(paths.missing_extracted_asset(fdid, &shared_path));
     }
-    if let Some(published) = paths.identity() {
-        let install_root = wow_install_path().ok_or("WoW install not found")?;
-        let active = read_requested_build(paths, install_root)?;
-        let current = AssetIdentity::new(&active.product, &active.build_key)?;
-        let published_root = published.asset_root(paths.shared_data_root());
-        let relative = shared_path
-            .strip_prefix(&published_root)
-            .map_err(|e| format!("published asset path {}: {e}", shared_path.display()))?;
-        shared_path = current.asset_path(paths.shared_data_root(), relative);
-        if shared_path.is_file() {
-            return Ok(shared_path);
-        }
+    shared_path = read_current_asset_path(paths, &shared_path)?;
+    if shared_path.is_file() {
+        return Ok(shared_path);
     }
     eprintln!(
         "asset-cache miss: fdid {fdid} not cached at {}, extracting from local CASC",
@@ -401,6 +392,23 @@ pub(crate) fn ensure_file_cached_checked_with_paths(
     extract_fdid_to_path_with_paths(paths, listfile, fdid, &shared_path)
         .map(|extracted| extracted.path)
         .map_err(|error| format!("FDID {fdid} at {}: {error}", shared_path.display()))
+}
+
+fn read_current_asset_path(
+    paths: &ResolverPaths,
+    published_path: &Path,
+) -> Result<PathBuf, String> {
+    let Some(published) = paths.identity() else {
+        return Ok(published_path.to_owned());
+    };
+    let install_root = wow_install_path().ok_or("WoW install not found")?;
+    let active = read_requested_build(paths, install_root)?;
+    let current = AssetIdentity::new(&active.product, &active.build_key)?;
+    let published_root = published.asset_root(paths.shared_data_root());
+    let relative = published_path
+        .strip_prefix(&published_root)
+        .map_err(|e| format!("published asset path {}: {e}", published_path.display()))?;
+    Ok(current.asset_path(paths.shared_data_root(), relative))
 }
 
 pub fn resolve_bytes(fdid: u32) -> Option<Vec<u8>> {

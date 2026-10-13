@@ -139,6 +139,7 @@ fn patch_changes_extracted_bytes_and_cache_namespace_without_relabelling_receipt
             .unwrap(),
         published
     );
+    fs::write(data.join("textures/120191.blp"), b"unqualified-decoy").unwrap();
     let extracted = authored
         .ensure_cached_checked(120191, &data.join("textures/120191.blp"))
         .unwrap();
@@ -148,5 +149,9 @@ fn patch_changes_extracted_bytes_and_cache_namespace_without_relabelling_receipt
         data.join(format!("products/wow/{second}/textures/120191.blp"))
     );
     assert_eq!(fs::read(published).unwrap(), b"historical-receipt-bytes");
+    assert_eq!(
+        fs::read(data.join("textures/120191.blp")).unwrap(),
+        b"unqualified-decoy"
+    );
     fs::remove_dir_all(root).unwrap();
 }

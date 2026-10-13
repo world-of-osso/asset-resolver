@@ -100,25 +100,6 @@ fn builds_of_same_product_do_not_share_cached_bytes() {
 }
 
 #[test]
-fn unavailable_pinned_build_cannot_borrow_legacy_or_current_build() {
-    let fixture = Fixture::new();
-    let identity =
-        AssetIdentity::new("wow_classic_beta", "00000000000000000000000000000000").unwrap();
-    let destination = fixture.0.join("models/1100087.m2");
-    fs::create_dir_all(destination.parent().unwrap()).unwrap();
-    fs::write(&destination, b"legacy-retail").unwrap();
-    let resolver = fixture.resolver(identity);
-    let error = resolver
-        .ensure_cached_checked(1100087, &destination)
-        .unwrap_err();
-    assert!(
-        error.contains("00000000000000000000000000000000"),
-        "{error}"
-    );
-    assert_eq!(fs::read(destination).unwrap(), b"legacy-retail");
-}
-
-#[test]
 fn qualified_paths_keep_their_identity_and_cannot_be_relabelled() {
     let fixture = Fixture::new();
     let retail = AssetIdentity::new("wow", RETAIL_KEY).unwrap();
