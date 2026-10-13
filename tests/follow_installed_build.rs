@@ -301,6 +301,28 @@ fn interrupted_builder_leaves_no_visible_cache_and_next_process_recovers() {
 }
 
 #[test]
+fn truncated_metadata_archive_does_not_publish_a_namespace() {
+    let (root, install, key) = cache_fixture("truncated");
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(install.root.join("Data/data/data.000"))
+        .unwrap();
+    file.set_len(install.archive.len() as u64 - 5).unwrap();
+    let output = spawn_cache_reader(&root).wait_with_output().unwrap();
+    assert!(
+        !output.status.success(),
+        "truncated metadata must fail explicitly"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("encoding"),
+        "missing metadata error: {stderr}"
+    );
+    assert!(!root.join(format!("cache/casc/wow/{key}/schema-2")).exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn mid_patch_metadata_does_not_publish_a_namespace() {
     let (root, mut install, key) = cache_fixture("mid-patch");
     // The index still advertises the original root entry, but the patch has

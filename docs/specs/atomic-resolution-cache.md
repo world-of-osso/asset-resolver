@@ -11,7 +11,7 @@
 
 ## Proof
 
-`tests/follow_installed_build.rs`: twelve real concurrent reader processes against a synthetic CASC install, killed private publisher followed by real-install recovery, and mid-patch root metadata rejection. Existing patch-transition test covers separate build namespaces.
+`tests/follow_installed_build.rs`: twelve real concurrent reader processes against a synthetic CASC install, killed private publisher followed by real-install recovery, mid-patch root metadata rejection, and truncated encoding archive rejection. `src/casc_cache.rs` also verifies freshness inspection preserves databases and transaction sidecars. Existing patch-transition test covers separate build namespaces.
 
 ## Exclusions
 

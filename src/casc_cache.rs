@@ -474,6 +474,25 @@ mod tests {
     }
 
     #[test]
+    fn freshness_inspection_preserves_database_and_transaction_sidecars() {
+        let casc_dir = create_temp_casc_dir();
+        let cache_path = casc_dir.join("resolution.sqlite");
+        std::fs::write(&cache_path, b"database-under-construction").unwrap();
+        for suffix in ["sqlite-journal", "sqlite-wal"] {
+            let sidecar = cache_path.with_extension(suffix);
+            std::fs::write(&sidecar, b"transaction-in-progress").unwrap();
+            assert_eq!(resolution_cache_is_fresh(&casc_dir), Ok(false));
+            assert_eq!(
+                std::fs::read(&cache_path).unwrap(),
+                b"database-under-construction"
+            );
+            assert_eq!(std::fs::read(&sidecar).unwrap(), b"transaction-in-progress");
+            std::fs::remove_file(sidecar).unwrap();
+        }
+        std::fs::remove_dir_all(casc_dir).unwrap();
+    }
+
+    #[test]
     fn resolution_cache_is_fresh_errors_when_cache_cannot_be_opened() {
         let casc_dir = create_temp_casc_dir();
         std::fs::create_dir(casc_dir.join("resolution.sqlite"))
