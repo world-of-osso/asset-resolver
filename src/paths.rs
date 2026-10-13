@@ -82,7 +82,6 @@ impl ResolverPaths {
         &self.source_data_root
     }
 
-    #[cfg(test)]
     pub(crate) fn shared_data_root(&self) -> &Path {
         &self.shared_data_root
     }

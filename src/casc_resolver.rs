@@ -14,7 +14,7 @@ use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use binrw::BinRead;
 use cascette_client_storage::index::IndexManager;
 use cascette_client_storage::storage::ArchiveManager;
-use cascette_client_storage::{BuildInfoFile, Installation, read_installed_product};
+use cascette_client_storage::{BuildInfoFile, Installation};
 
 use crate::casc_cache::CascResolutionCache;
 use crate::listfile::Listfile;
@@ -55,7 +55,7 @@ impl From<PartialDecode> for FileContent {
 }
 
 type CascCell = Arc<OnceLock<Result<Arc<CascState>, String>>>;
-type CascNamespace = (PathBuf, Option<AssetIdentity>);
+type CascNamespace = (PathBuf, AssetIdentity);
 static CASC: LazyLock<Mutex<HashMap<CascNamespace, CascCell>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static WOW_INSTALL_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -374,12 +374,25 @@ pub(crate) fn ensure_file_cached_checked_with_paths(
     fdid: u32,
     out_path: &Path,
 ) -> Result<PathBuf, String> {
-    let shared_path = paths.scoped_cache_path(out_path)?;
+    let mut shared_path = paths.scoped_cache_path(out_path)?;
     if shared_path.is_file() {
         return Ok(shared_path);
     }
     if paths.runtime_mode() == crate::AssetRuntimeMode::ExtractedOnly {
         return Err(paths.missing_extracted_asset(fdid, &shared_path));
+    }
+    if let Some(published) = paths.identity() {
+        let install_root = wow_install_path().ok_or("WoW install not found")?;
+        let active = read_requested_build(paths, install_root)?;
+        let current = AssetIdentity::new(&active.product, &active.build_key)?;
+        let published_root = published.asset_root(paths.shared_data_root());
+        let relative = shared_path
+            .strip_prefix(&published_root)
+            .map_err(|e| format!("published asset path {}: {e}", shared_path.display()))?;
+        shared_path = current.asset_path(paths.shared_data_root(), relative);
+        if shared_path.is_file() {
+            return Ok(shared_path);
+        }
     }
     eprintln!(
         "asset-cache miss: fdid {fdid} not cached at {}, extracting from local CASC",
@@ -558,7 +571,10 @@ fn write_to_path(out_path: &Path, data: &[u8]) -> Result<(), String> {
 
 fn get_casc(paths: &ResolverPaths) -> Result<Arc<CascState>, String> {
     crate::guard_casc_access(paths.runtime_mode(), "open CASC state")?;
-    let namespace = (paths.cache_root().to_path_buf(), paths.identity().cloned());
+    let install_root = wow_install_path().ok_or("WoW install not found")?;
+    let active = read_requested_build(paths, install_root)?;
+    let identity = AssetIdentity::new(&active.product, &active.build_key)?;
+    let namespace = (paths.cache_root().to_path_buf(), identity);
     let cell = {
         let mut states = CASC
             .lock()
@@ -591,7 +607,10 @@ fn init_casc(paths: &ResolverPaths) -> Result<CascState, String> {
         casc_dir.display()
     );
     Ok(CascState {
-        identity: paths.identity().cloned(),
+        identity: Some(AssetIdentity::new(
+            &active_build.product,
+            &active_build.build_key,
+        )?),
         install,
         keys,
         cache,
@@ -764,38 +783,46 @@ fn parse_local_blte(raw_blte: &[u8]) -> Result<BlteFile, String> {
 }
 
 fn read_requested_build(paths: &ResolverPaths, install_root: &Path) -> Result<ActiveBuild, String> {
-    let Some(identity) = paths.identity() else {
-        return read_active_build(install_root);
-    };
-    let config_path = data_config_path(install_root, identity.build_key())?;
-    let file = std::fs::File::open(&config_path).map_err(|error| {
-        format!(
-            "open authored {} build {} config {}: {error}",
-            identity.product(),
-            identity.build_key(),
-            config_path.display()
-        )
-    })?;
-    let config = BuildConfig::parse(file)
-        .map_err(|error| format!("parse {}: {error}", config_path.display()))?;
-    Ok(ActiveBuild {
-        product: identity.product().to_owned(),
-        build_key: identity.build_key().to_owned(),
-        config,
-    })
+    let product = paths
+        .identity()
+        .map(|identity| identity.product().to_owned())
+        .unwrap_or_else(selected_wow_product);
+    read_product_build(install_root, &product)
 }
 
 fn read_active_build(install_root: &Path) -> Result<ActiveBuild, String> {
-    let installed = read_installed_product(install_root, &selected_wow_product())
-        .map_err(|e| format!("read installed WoW product: {e}"))?;
-    let build_config_path = data_config_path(install_root, &installed.build_key)?;
+    read_product_build(install_root, &selected_wow_product())
+}
+
+fn read_product_build(install_root: &Path, product: &str) -> Result<ActiveBuild, String> {
+    let info_path = install_root.join(".build.info");
+    let content = std::fs::read_to_string(&info_path)
+        .map_err(|e| format!("read {}: {e}", info_path.display()))?;
+    let info = BuildInfoFile::parse_str(&content)
+        .map_err(|e| format!("parse {}: {e}", info_path.display()))?;
+    let entries = info.entries();
+    let mut active = entries
+        .iter()
+        .filter(|row| row.is_active() && row.product() == Some(product));
+    let row = active
+        .next()
+        .ok_or_else(|| format!("{} has no active row for {product}", info_path.display()))?;
+    if active.next().is_some() {
+        return Err(format!(
+            "{} has multiple active rows for {product}",
+            info_path.display()
+        ));
+    }
+    let build_key = row.build_key().ok_or("active build row has no build key")?;
+    parse_hex_16(build_key)?;
+    let build_config_path = data_config_path(install_root, build_key)?;
     let build_config = std::fs::File::open(&build_config_path)
         .map_err(|e| format!("open {}: {e}", build_config_path.display()))?;
     let config = BuildConfig::parse(build_config)
         .map_err(|e| format!("parse {}: {e}", build_config_path.display()))?;
     Ok(ActiveBuild {
-        product: installed.product,
-        build_key: installed.build_key,
+        product: product.to_owned(),
+        build_key: build_key.to_owned(),
         config,
     })
 }
@@ -902,7 +929,11 @@ fn read_keyring_keys(
     let entries = build_info.entries();
     let entry = entries
         .iter()
-        .find(|entry| entry.product() == Some(product) && entry.build_key() == Some(build_key))
+        .find(|entry| {
+            entry.is_active()
+                && entry.product() == Some(product)
+                && entry.build_key() == Some(build_key)
+        })
         .ok_or_else(|| {
             format!(
                 "{} has no row for {product} build {build_key}",
@@ -974,55 +1005,25 @@ mod installed_build_tests {
         f()
     }
 
-    // Wire-format fixture independent of cascette's protobuf definitions.
-    fn varint(mut value: usize) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        while value >= 128 {
-            bytes.push((value as u8 & 0x7f) | 0x80);
-            value >>= 7;
-        }
-        bytes.push(value as u8);
-        bytes
-    }
-
-    fn field(tag: usize, value: &[u8]) -> Vec<u8> {
-        let mut bytes = varint((tag << 3) | 2);
-        bytes.extend(varint(value.len()));
-        bytes.extend_from_slice(value);
-        bytes
-    }
-
-    fn product(code: &str, key: &str) -> Vec<u8> {
-        let mut base = field(7, b"1.60.1");
-        base.extend(field(14, key.as_bytes()));
-        base.extend(field(16, RETAIL_KEY.as_bytes()));
-        let mut install = field(2, code.as_bytes());
-        install.extend(field(4, &field(1, &base)));
-        field(1, &install)
-    }
-
     #[test]
-    fn requested_forever_build_is_selected_without_build_info_row() {
+    fn requested_product_requires_its_own_active_build_info_row() {
         let fixture = Fixture::new();
         std::fs::write(
             fixture.0.join(".build.info"),
             format!("Active!DEC:1|Build Key!HEX:16|Product!STRING:0\n1|{RETAIL_KEY}|wow\n"),
         )
         .unwrap();
-        let mut db = product("wow", RETAIL_KEY);
-        db.extend(product("wow_forever", FOREVER_KEY));
-        std::fs::write(fixture.0.join(".product.db"), db).unwrap();
         fixture.write_config(RETAIL_KEY, RETAIL_KEY);
         fixture.write_config(FOREVER_KEY, FOREVER_KEY);
 
-        let selected = with_forever_product(|| read_active_build(&fixture.0)).unwrap();
-        assert_eq!(selected.product, "wow_forever");
-        assert_eq!(selected.build_key, FOREVER_KEY);
-        assert_eq!(selected.config.root(), Some(FOREVER_KEY));
+        let error = with_forever_product(|| read_active_build(&fixture.0))
+            .err()
+            .unwrap();
+        assert!(error.contains("no active row for wow_forever"), "{error}");
     }
 
     #[test]
-    fn authored_build_reads_pinned_config_even_with_a_different_active_build() {
+    fn receipt_build_follows_active_install_after_patch() {
         let fixture = Fixture::new();
         fixture.write_config(RETAIL_KEY, RETAIL_KEY);
         fixture.write_config(FOREVER_KEY, FOREVER_KEY);
@@ -1031,17 +1032,23 @@ mod installed_build_tests {
             format!("Active!DEC:1|Build Key!HEX:16|Product!STRING:0\n1|{RETAIL_KEY}|wow\n"),
         )
         .unwrap();
-        let identity = AssetIdentity::new("wow_classic_beta", FOREVER_KEY).unwrap();
+        let identity = AssetIdentity::new("wow", FOREVER_KEY).unwrap();
         let paths =
             ResolverPaths::from_config(crate::AssetResolverConfig::new().with_identity(identity));
         let selected = read_requested_build(&paths, &fixture.0).unwrap();
-        assert_eq!(selected.product, "wow_classic_beta");
-        assert_eq!(selected.build_key, FOREVER_KEY);
-        assert_eq!(selected.config.root(), Some(FOREVER_KEY));
+        assert_eq!(selected.product, "wow");
+        assert_eq!(selected.build_key, RETAIL_KEY);
+        assert_eq!(selected.config.root(), Some(RETAIL_KEY));
+        std::fs::write(fixture.0.join(".build.info"), format!(
+            "Active!DEC:1|Build Key!HEX:16|Product!STRING:0\n0|{RETAIL_KEY}|wow\n1|{FOREVER_KEY}|wow\n"
+        )).unwrap();
+        let patched = read_requested_build(&paths, &fixture.0).unwrap();
+        assert_eq!(patched.build_key, FOREVER_KEY);
+        assert_eq!(patched.config.root(), Some(FOREVER_KEY));
     }
 
     #[test]
-    fn missing_authored_build_does_not_read_the_active_config() {
+    fn absent_product_does_not_borrow_retail_active_config() {
         let fixture = Fixture::new();
         fixture.write_config(RETAIL_KEY, RETAIL_KEY);
         std::fs::write(
@@ -1054,8 +1061,11 @@ mod installed_build_tests {
             ResolverPaths::from_config(crate::AssetResolverConfig::new().with_identity(identity));
         let error = read_requested_build(&paths, &fixture.0)
             .err()
-            .expect("missing pinned config");
-        assert!(error.contains(FOREVER_KEY), "{error}");
+            .expect("missing active product");
+        assert!(
+            error.contains("no active row for wow_classic_beta"),
+            "{error}"
+        );
     }
 
     const KEYRING_KEY: &str = "3ca57fe7319a297346440e4d2a03a0cd";
@@ -1127,14 +1137,13 @@ mod installed_build_tests {
             format!("Active!DEC:1|Build Key!HEX:16|Product!STRING:0\n1|{RETAIL_KEY}|wow\n"),
         )
         .unwrap();
-        std::fs::write(fixture.0.join(".product.db"), product("wow", RETAIL_KEY)).unwrap();
         fixture.write_config(RETAIL_KEY, RETAIL_KEY);
 
         let error = with_forever_product(|| read_active_build(&fixture.0))
             .err()
             .unwrap();
         assert!(error.contains("wow_forever"), "{error}");
-        assert!(error.contains(".product.db"), "{error}");
+        assert!(error.contains(".build.info"), "{error}");
     }
 }
 

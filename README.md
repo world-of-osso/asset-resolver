@@ -15,10 +15,18 @@ qualified cache path or the extraction error. With an identity, a destination
 animations and textures use the same namespace. Already qualified paths must
 match the requested identity. Unqualified files are never read or relabelled.
 
-CASC initialization selects the requested build config, not the active product
-or `WOW_PRODUCT`. States and cached failures are separate per cache root and
-identity. Missing matching configs, root entries or decryption keys error; an
-explicit-identity FDID cannot borrow the installation's listfile-path lookup.
+Local CASC extraction selects the product's unique active `.build.info` row,
+never the receipt's former build key or `.product.db`. `WOW_PRODUCT` selects the
+product for unqualified requests; explicit identities select their own product.
+States, failures, root/encoding files and resolution SQLite are keyed by cache
+root + installed product/build (`casc/<product>/<build-key>/schema-2/`). A patch
+opens a new state/cache even within one process. Legacy unqualified tables are
+not reused. Missing configs, root entries or decryption keys error.
+
+Existing qualified files retain their historical identity. A miss extracts into
+the currently installed build's namespace and returns that actual path; it never
+labels newly extracted bytes with the old receipt key. Extracted-only behavior
+is unchanged and never consults the install.
 Consumers must retain the namespace in parsed-model, decoded-texture and GPU
 material keys. This library does not infer a model's author from race or FDID.
 
@@ -50,5 +58,7 @@ It is an explicit offline source, not a runtime or legacy fallback.
 `cargo test --locked --test product_identity` exercises real scoped cache reads,
 product/build coexistence, companion-name namespaces, legacy rejection and
 qualified-path ownership. Payload receipts are not M2/BLP parsing or GPU proof.
-`cargo test --locked --lib authored_build` exercises pinned config selection;
-`cargo test --locked --lib missing_authored_build` tests unavailable build errors.
+`cargo test --locked --lib installed_build_tests` checks active-row and product
+selection. `cargo test --locked --test follow_installed_build` creates real local
+indices/archives, bootstraps tables, patches `.build.info` in-process and proves
+new bytes/new cache namespace plus preservation of historical published bytes.
