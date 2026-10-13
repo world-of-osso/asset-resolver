@@ -83,23 +83,86 @@ impl CascResolutionCache {
     }
 }
 
+/// Serialize bootstrap with a sibling flock and publish only complete namespaces.
+/// Complete build-key namespaces are immutable. Orphan staging directories from
+/// killed builders are never consulted; the OS releases their flock on exit.
+pub fn publish_resolution_namespace(
+    casc_dir: &Path,
+    write_cache: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let _lock = acquire_namespace_lock(casc_dir)?;
+    if resolution_cache_is_fresh(casc_dir)? {
+        return Ok(());
+    }
+    let staging = create_namespace_staging(casc_dir)?;
+    let result =
+        write_cache(&staging).and_then(|()| publish_complete_namespace(&staging, casc_dir));
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)
+            .map_err(|e| format!("cleanup {} after {result:?}: {e}", staging.display()))?;
+    }
+    result
+}
+
+fn acquire_namespace_lock(casc_dir: &Path) -> Result<std::fs::File, String> {
+    let parent = casc_dir.parent().ok_or("CASC namespace has no parent")?;
+    std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    let name = casc_dir
+        .file_name()
+        .ok_or("CASC namespace has no name")?
+        .to_string_lossy();
+    let lock_path = parent.join(format!(".{name}.lock"));
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| format!("open namespace lock {}: {e}", lock_path.display()))?;
+    lock.lock()
+        .map_err(|e| format!("flock {}: {e}", lock_path.display()))?;
+    Ok(lock)
+}
+
+fn create_namespace_staging(casc_dir: &Path) -> Result<PathBuf, String> {
+    let parent = casc_dir.parent().ok_or("CASC namespace has no parent")?;
+    let name = casc_dir
+        .file_name()
+        .ok_or("CASC namespace has no name")?
+        .to_string_lossy();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("staging timestamp: {e}"))?
+        .as_nanos();
+    let staging = parent.join(format!(".{name}.{}.{nonce}.partial", std::process::id()));
+    std::fs::create_dir(&staging).map_err(|e| format!("create {}: {e}", staging.display()))?;
+    Ok(staging)
+}
+
+fn publish_complete_namespace(staging: &Path, casc_dir: &Path) -> Result<(), String> {
+    if !resolution_cache_is_fresh(staging)? {
+        return Err(format!("incomplete CASC namespace {}", staging.display()));
+    }
+    // Only pre-atomic, incomplete namespaces reach here. Complete namespaces
+    // were reused under the lock, and are never removed or overwritten.
+    if casc_dir.exists() {
+        std::fs::remove_dir_all(casc_dir)
+            .map_err(|e| format!("remove incomplete {}: {e}", casc_dir.display()))?;
+    }
+    std::fs::rename(staging, casc_dir).map_err(|e| format!("publish {}: {e}", casc_dir.display()))
+}
+
 pub fn resolution_cache_is_fresh(casc_dir: &Path) -> Result<bool, String> {
     let (cache_path, root_path, enc_path) = resolution_paths(casc_dir);
     if !cache_path.exists() {
         return Ok(false);
     }
 
-    // If a previous bootstrap was killed mid-write, SQLite leaves a rollback
-    // journal alongside the .sqlite file. Read-only opens then fail with
-    // "attempt to write a readonly database" because SQLite needs to recover
-    // the journal. Wipe the half-written cache so the caller rebuilds from
-    // CASC instead of erroring out forever.
+    // Inspect only. Recovery/removal belongs to the locked namespace publisher,
+    // never a reader racing another process's SQLite transaction.
     let journal_path = cache_path.with_extension("sqlite-journal");
     let wal_path = cache_path.with_extension("sqlite-wal");
     if journal_path.exists() || wal_path.exists() {
-        let _ = std::fs::remove_file(&cache_path);
-        let _ = std::fs::remove_file(&journal_path);
-        let _ = std::fs::remove_file(&wal_path);
         return Ok(false);
     }
 

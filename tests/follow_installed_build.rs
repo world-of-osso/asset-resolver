@@ -16,6 +16,7 @@ struct Install {
     root: PathBuf,
     archive: Vec<u8>,
     indices: IndexManager,
+    root_span: std::ops::Range<usize>,
 }
 impl Install {
     fn store(&mut self, raw: &[u8]) -> EncodingKey {
@@ -41,7 +42,9 @@ impl Install {
         );
         let root = root.build().unwrap();
         let root_content = ContentKey::from_data(&root);
+        let root_start = self.archive.len();
         let root_encoded = self.store(&root);
+        self.root_span = root_start..self.archive.len();
         let mut encoding = EncodingBuilder::new();
         for (content_key, encoding_key, size) in [
             (content, encoded, raw.len()),
@@ -89,6 +92,7 @@ fn patch_changes_extracted_bytes_and_cache_namespace_without_relabelling_receipt
         root: install_root.clone(),
         archive: vec![],
         indices: IndexManager::new(install_root.join("Data/data")),
+        root_span: 0..0,
     };
     let first = install.build(b"BLP2-before-patch");
     let second = install.build(b"BLP2-after-patch");
@@ -153,6 +157,166 @@ fn patch_changes_extracted_bytes_and_cache_namespace_without_relabelling_receipt
     assert_eq!(
         fs::read(data.join("textures/120191.blp")).unwrap(),
         b"unqualified-decoy"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+fn cache_fixture(name: &str) -> (PathBuf, Install, String) {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("casc-{name}-{}-{nonce}", std::process::id()));
+    let install_root = root.join("install");
+    fs::create_dir_all(install_root.join("Data/data")).unwrap();
+    let mut install = Install {
+        root: install_root.clone(),
+        archive: vec![],
+        indices: IndexManager::new(install_root.join("Data/data")),
+        root_span: 0..0,
+    };
+    let key = install.build(b"BLP2-concurrent-readers");
+    install.indices.save_all().unwrap();
+    fs::write(install.root.join("Data/data/data.000"), &install.archive).unwrap();
+    install.activate(&key);
+    (root, install, key)
+}
+
+fn spawn_cache_reader(root: &Path) -> std::process::Child {
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "cache_process_reader", "--nocapture"])
+        .env("CASC_PROCESS_FIXTURE", root)
+        .env("WOW_INSTALL_PATH", root.join("install"))
+        .env("WOW_PRODUCT", "wow")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+#[test]
+fn cache_process_reader() {
+    let Some(root) = std::env::var_os("CASC_PROCESS_FIXTURE") else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    if std::env::var_os("CASC_INTERRUPT_BUILDER").is_some() {
+        let key = fs::read_to_string(root.join("build-key")).unwrap();
+        let namespace = root.join(format!("cache/casc/wow/{key}/schema-2"));
+        asset_resolver::casc_cache::publish_resolution_namespace(&namespace, |staging| {
+            fs::write(
+                staging.join("encoding.bin"),
+                b"interrupted partial metadata",
+            )
+            .unwrap();
+            fs::write(root.join("builder-started"), b"ready").unwrap();
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        })
+        .unwrap();
+        return;
+    }
+    let resolver = CascListfileResolver::new(
+        AssetResolverConfig::new()
+            .with_data_root(root.join("data"))
+            .with_shared_data_root(root.join("data"))
+            .with_cache_root(root.join("cache")),
+    );
+    assert_eq!(
+        resolver.resolve_bytes(120191).unwrap(),
+        b"BLP2-concurrent-readers"
+    );
+}
+
+#[test]
+fn concurrent_processes_publish_one_complete_cache() {
+    let (root, _install, key) = cache_fixture("concurrent");
+    let children: Vec<_> = (0..12).map(|_| spawn_cache_reader(&root)).collect();
+    let outputs: Vec<_> = children
+        .into_iter()
+        .map(|child| child.wait_with_output().unwrap())
+        .collect();
+    let mut builds = 0;
+    for output in outputs {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "reader failed: {stderr}\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        builds += stderr.matches("Built CASC resolution cache").count();
+    }
+    assert_eq!(builds, 1, "only the lock owner may build");
+    let namespace = root.join(format!("cache/casc/wow/{key}/schema-2"));
+    let cache = asset_resolver::casc_cache::CascResolutionCache::open(&namespace).unwrap();
+    assert!(cache.resolve_fdid(120191).is_some());
+    assert!(namespace.join("root.bin").is_file());
+    assert!(namespace.join("encoding.bin").is_file());
+    assert!(!namespace.join("resolution.sqlite-journal").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn interrupted_builder_leaves_no_visible_cache_and_next_process_recovers() {
+    let (root, _install, key) = cache_fixture("interrupted");
+    fs::write(root.join("build-key"), &key).unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "cache_process_reader", "--nocapture"])
+        .env("CASC_PROCESS_FIXTURE", &root)
+        .env("CASC_INTERRUPT_BUILDER", "1")
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !root.join("builder-started").exists() {
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("builder never entered private staging directory");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let namespace = root.join(format!("cache/casc/wow/{key}/schema-2"));
+    let visible_while_building = namespace.exists();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(
+        !visible_while_building,
+        "in-progress metadata must stay private"
+    );
+    assert!(!namespace.exists());
+    let output = spawn_cache_reader(&root).wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        asset_resolver::casc_cache::CascResolutionCache::open(&namespace)
+            .unwrap()
+            .resolve_fdid(120191)
+            .is_some()
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn mid_patch_metadata_does_not_publish_a_namespace() {
+    let (root, mut install, key) = cache_fixture("mid-patch");
+    // The index still advertises the original root entry, but the patch has
+    // overwritten only its payload. Encoding remains readable.
+    install.archive[install.root_span.start + 9..install.root_span.end].fill(0);
+    fs::write(install.root.join("Data/data/data.000"), &install.archive).unwrap();
+    let output = spawn_cache_reader(&root).wait_with_output().unwrap();
+    assert!(
+        !output.status.success(),
+        "mid-patch metadata must fail explicitly"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("root"), "missing metadata error: {stderr}");
+    assert!(
+        !root.join(format!("cache/casc/wow/{key}/schema-2")).exists(),
+        "failed builders must not publish any cache files"
     );
     fs::remove_dir_all(root).unwrap();
 }

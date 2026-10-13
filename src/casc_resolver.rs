@@ -668,9 +668,14 @@ pub fn refresh_resolution_cache_for_install(install_root: &Path) -> Result<PathB
     let data_root = install_root.join("Data");
     let install = Installation::open(data_root).map_err(|e| format!("CASC open: {e}"))?;
     let active_build = read_active_build(install_root)?;
-    let keys = load_tact_keys(crate::paths::default_paths(), install_root, &active_build)?;
     let casc_dir = crate::paths::casc_cache_path(&active_build.product, &active_build.build_key);
-    rebuild_resolution_cache(&keys, &install, &casc_dir, &active_build.config)?;
+    ensure_resolution_cache(
+        crate::paths::default_paths(),
+        install_root,
+        &install,
+        &casc_dir,
+        &active_build,
+    )?;
     Ok(casc_dir)
 }
 
@@ -681,16 +686,12 @@ fn ensure_resolution_cache(
     casc_dir: &Path,
     active_build: &ActiveBuild,
 ) -> Result<(), String> {
-    if crate::casc_cache::resolution_cache_is_fresh(casc_dir)? {
-        return Ok(());
-    }
-
-    std::fs::create_dir_all(casc_dir)
-        .map_err(|e| format!("create CASC cache dir {}: {e}", casc_dir.display()))?;
-    run_async(install.initialize()).map_err(|e| format!("CASC init for cache bootstrap: {e}"))?;
-
-    let keys = load_tact_keys(paths, install_root, active_build)?;
-    rebuild_resolution_cache(&keys, install, casc_dir, &active_build.config)
+    crate::casc_cache::publish_resolution_namespace(casc_dir, |staging| {
+        run_async(install.initialize())
+            .map_err(|e| format!("CASC init for cache bootstrap: {e}"))?;
+        let keys = load_tact_keys(paths, install_root, active_build)?;
+        rebuild_resolution_cache(&keys, install, staging, &active_build.config)
+    })
 }
 
 fn rebuild_resolution_cache(
@@ -712,6 +713,8 @@ fn rebuild_resolution_cache(
         .and_then(parse_encoding_key)?;
     let encoding_data = read_refresh_file_by_encoding_key(keys, install, &encoding_key)
         .map_err(|e| format!("read encoding file {encoding_key}: {e}"))?;
+    let encoding_content_key = parse_content_key(&encoding_info.content_key)?;
+    validate_metadata_content("encoding", &encoding_data, &encoding_content_key)?;
     std::fs::write(casc_dir.join("encoding.bin"), &encoding_data)
         .map_err(|e| format!("write {}: {e}", casc_dir.join("encoding.bin").display()))?;
 
@@ -722,10 +725,21 @@ fn rebuild_resolution_cache(
     let root_encoding_key = resolve_content_key_from_encoding(&encoding_data, &root_content_key)?;
     let root_data = read_refresh_file_by_encoding_key(keys, install, &root_encoding_key)
         .map_err(|e| format!("read root file {root_encoding_key}: {e}"))?;
+    validate_metadata_content("root", &root_data, &root_content_key)?;
     std::fs::write(casc_dir.join("root.bin"), &root_data)
         .map_err(|e| format!("write {}: {e}", casc_dir.join("root.bin").display()))?;
 
     crate::casc_cache::build_resolution_cache(casc_dir)
+}
+
+fn validate_metadata_content(name: &str, data: &[u8], expected: &ContentKey) -> Result<(), String> {
+    let actual = ContentKey::from_data(data);
+    if actual != *expected {
+        return Err(format!(
+            "{name} metadata content key mismatch: expected {expected}, got {actual}; install may be mid-patch"
+        ));
+    }
+    Ok(())
 }
 
 fn read_refresh_file_by_encoding_key(
