@@ -106,7 +106,7 @@ fn persisted_negative_cache_does_not_block_available_local_texture() {
         stderr.lines().any(|line| {
             line.contains(&UNAVAILABLE_FDID.to_string())
                 && line.contains(failed_path.to_str().expect("UTF-8 fixture path"))
-                && line.contains("missing resolution and listfile entry")
+                && line.contains(&format!("FDID {UNAVAILABLE_FDID} absent from wow build "))
         }),
         "failure must identify FDID, output path and local resolution error: {stderr}"
     );
