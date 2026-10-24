@@ -763,15 +763,13 @@ fn read_keyring_keys(
     let build_info = BuildInfoFile::parse_str(&content)
         .map_err(|e| format!("parse {}: {e}", build_info_path.display()))?;
     let entries = build_info.entries();
-    let entry = entries
+    let Some(entry) = entries
         .iter()
         .find(|entry| entry.product() == Some(product) && entry.build_key() == Some(build_key))
-        .ok_or_else(|| {
-            format!(
-                "{} has no row for {product} build {build_key}",
-                build_info_path.display()
-            )
-        })?;
+    else {
+        // Installed identity comes from .product.db; keyring metadata is optional.
+        return Ok(Vec::new());
+    };
     let Some(keyring_key) = entry.keyring() else {
         return Ok(Vec::new());
     };
