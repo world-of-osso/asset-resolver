@@ -936,13 +936,52 @@ mod installed_build_tests {
     }
 
     #[test]
-    fn keyring_for_other_build_is_an_error() {
+    fn keyring_for_other_build_contributes_no_keys() {
         let fixture = Fixture::new();
         write_keyring_install(&fixture);
 
-        let error = read_keyring_keys(&fixture.0, "wow", CLASSIC_KEY).unwrap_err();
+        let keys = read_keyring_keys(&fixture.0, "wow", CLASSIC_KEY).unwrap();
 
-        assert!(error.contains("has no row for wow build"), "{error}");
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn absent_beta_row_contributes_no_keyring_keys() {
+        let fixture = Fixture::new();
+        write_keyring_install(&fixture);
+
+        // Even an identical build key under another product is not eligible.
+        let keys = read_keyring_keys(&fixture.0, "wow_classic_beta", RETAIL_KEY).unwrap();
+
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn unreadable_referenced_keyring_is_an_error() {
+        let fixture = Fixture::new();
+        write_keyring_install(&fixture);
+        std::fs::remove_file(data_config_path(&fixture.0, KEYRING_KEY).unwrap()).unwrap();
+
+        let error = read_keyring_keys(&fixture.0, "wow", RETAIL_KEY).unwrap_err();
+
+        assert!(error.contains("open keyring"), "{error}");
+        assert!(error.contains(KEYRING_KEY), "{error}");
+    }
+
+    #[test]
+    fn malformed_referenced_keyring_is_an_error() {
+        let fixture = Fixture::new();
+        write_keyring_install(&fixture);
+        std::fs::write(
+            data_config_path(&fixture.0, KEYRING_KEY).unwrap(),
+            "key-4eb4869f95f23b53 = not-a-tact-key\n",
+        )
+        .unwrap();
+
+        let error = read_keyring_keys(&fixture.0, "wow", RETAIL_KEY).unwrap_err();
+
+        assert!(error.contains("keyring"), "{error}");
+        assert!(error.contains(KEYRING_KEY), "{error}");
     }
 
     #[test]
