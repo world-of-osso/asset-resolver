@@ -289,6 +289,32 @@ mod tests {
     }
 
     #[test]
+    fn parallel_writers_in_one_process_persist_every_local_entry() {
+        let temp = TestTempDir::new();
+        let local_cache = temp.path("local.sqlite");
+        let entries: Vec<(u32, String)> = (0..400)
+            .map(|index| (3_000_000 + index, format!("World/Maps/Test/{index}.blp")))
+            .collect();
+        std::thread::scope(|scope| {
+            for chunk in entries.chunks(25) {
+                let local_cache = &local_cache;
+                scope.spawn(move || {
+                    for (fdid, path) in chunk {
+                        listfile_cache::remember_local_cache_entry(local_cache, *fdid, path)
+                            .unwrap();
+                    }
+                });
+            }
+        });
+        for (fdid, path) in &entries {
+            assert_eq!(
+                listfile_cache::lookup_local_fdid(&local_cache, *fdid).unwrap(),
+                Some(path.clone())
+            );
+        }
+    }
+
+    #[test]
     fn new_leaves_local_maps_empty_then_lookup_fdid_loads_sqlite_row() {
         let temp = TestTempDir::new();
         let local_cache = temp.path("local.sqlite");

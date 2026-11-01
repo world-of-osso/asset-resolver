@@ -1,10 +1,14 @@
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 use rusqlite::{Connection, OpenFlags};
 
 use crate::paths::ResolverPaths;
+
+/// Parallel loader workers write the same cache file; wait for the lock
+/// instead of dropping the entry with SQLITE_BUSY.
+const WRITE_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// One cache file per source listfile: projects sharing a data root may read
 /// different community listfiles, and a single shared cache would rebuild
@@ -52,10 +56,11 @@ pub fn remember_local_cache_entry(cache_path: &Path, fdid: u32, path: &str) -> R
         return Err(format!("missing parent for {}", cache_path.display()));
     };
     std::fs::create_dir_all(parent).map_err(|err| format!("create {}: {err}", parent.display()))?;
-    let conn = Connection::open(cache_path)
-        .map_err(|err| format!("open {}: {err}", cache_path.display()))?;
+    let conn = open_writable_cache(cache_path)?;
+    // IMMEDIATE takes the write lock up front, through the busy handler; a
+    // deferred read-to-write upgrade fails with SQLITE_BUSY without waiting.
     conn.execute_batch(
-        "BEGIN;
+        "BEGIN IMMEDIATE;
          CREATE TABLE IF NOT EXISTS local_listfile_entries (
              fdid INTEGER PRIMARY KEY,
              path TEXT NOT NULL,
@@ -163,6 +168,14 @@ fn query_path(conn: &Connection, path: &str) -> Result<Option<(u32, String)>, St
     })
 }
 
+fn open_writable_cache(cache_path: &Path) -> Result<Connection, String> {
+    let conn = Connection::open(cache_path)
+        .map_err(|err| format!("open {}: {err}", cache_path.display()))?;
+    conn.busy_timeout(WRITE_BUSY_TIMEOUT)
+        .map_err(|err| format!("set busy timeout on {}: {err}", cache_path.display()))?;
+    Ok(conn)
+}
+
 fn open_local_cache(cache_path: &Path) -> Result<Connection, String> {
     Connection::open_with_flags(
         cache_path,
@@ -176,8 +189,7 @@ fn ensure_cache(cache_path: &Path, source_path: &Path) -> Result<PathBuf, String
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("create {}: {err}", parent.display()))?;
     }
-    let conn = Connection::open(cache_path)
-        .map_err(|err| format!("open {}: {err}", cache_path.display()))?;
+    let conn = open_writable_cache(cache_path)?;
     if !source_path.exists() {
         if cache_has_entries(&conn)? {
             return Ok(cache_path.to_path_buf());
