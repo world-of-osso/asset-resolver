@@ -904,18 +904,30 @@ mod installed_build_tests {
             std::fs::create_dir_all(root.join("Data/data")).unwrap();
             std::fs::create_dir_all(root.join(flavor)).unwrap();
         }
-        let entry = |uid: &str, root: &Path, flavor: &str| {
+        let entry = |uid: &str, code: &str, family: &str, root: &Path, flavor: &str| {
             let mut settings = field(1, root.to_str().unwrap().as_bytes());
             settings.extend(field(13, flavor.as_bytes()));
             let mut product = field(1, uid.as_bytes());
-            product.extend(field(2, uid.as_bytes()));
+            product.extend(field(2, code.as_bytes()));
             product.extend(field(3, &settings));
-            product.extend(field(6, b"wow"));
+            product.extend(field(6, family.as_bytes()));
+            product.extend([0x38, 0]); // Unknown product status field.
             field(1, &product)
         };
-        let mut db = entry("wow", &retail, "_retail_");
-        db.extend(entry("wowt", &ptr, "_ptr_"));
-        assert_eq!(discover_agent_product(&db, "wowt").unwrap(), Some(ptr));
+        let mut db = entry("agent", "agent", "", &retail, "");
+        db.extend(entry("wow", "wow", "wow", &retail, "_retail_"));
+        db.extend(entry("wow_ptr", "wowt", "wow", &ptr, "_ptr_"));
+        db.extend(field(3, b"ignored database metadata"));
+        db.extend([0x30, 1]); // Unknown database counter.
+        assert_eq!(
+            discover_agent_product(&db, "wowt").unwrap(),
+            Some(ptr.clone())
+        );
+        assert_eq!(discover_agent_product(&db, "wow_ptr").unwrap(), None);
+        let other_family = entry("wow", "wow", "fenris", &retail, "_retail_");
+        assert_eq!(discover_agent_product(&other_family, "wow").unwrap(), None);
+        std::fs::remove_dir_all(ptr.join("Data")).unwrap();
+        assert_eq!(discover_agent_product(&db, "wowt").unwrap(), None);
         assert_eq!(
             discover_agent_product(&db, "wow").unwrap(),
             Some(retail.clone())
