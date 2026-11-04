@@ -862,6 +862,34 @@ mod installed_build_tests {
         field(1, &install)
     }
 
+    // RED seam: replaced by the production decoder in the next change.
+    fn discover_agent_product(_bytes: &[u8], _product: &str) -> Option<PathBuf> {
+        None
+    }
+
+    #[test]
+    fn agent_database_selects_requested_product_with_valid_layout() {
+        let fixture = Fixture::new();
+        let retail = fixture.0.join("retail-install");
+        let ptr = fixture.0.join("ptr-install");
+        for (root, flavor) in [(&retail, "_retail_"), (&ptr, "_ptr_")] {
+            std::fs::create_dir_all(root.join("Data/data")).unwrap();
+            std::fs::create_dir_all(root.join(flavor)).unwrap();
+        }
+        let entry = |uid: &str, root: &Path, flavor: &str| {
+            let mut settings = field(1, root.to_str().unwrap().as_bytes());
+            settings.extend(field(13, flavor.as_bytes()));
+            let mut product = field(1, uid.as_bytes());
+            product.extend(field(2, uid.as_bytes()));
+            product.extend(field(3, &settings));
+            product.extend(field(6, b"wow"));
+            field(1, &product)
+        };
+        let mut db = entry("wow", &retail, "_retail_");
+        db.extend(entry("wowt", &ptr, "_ptr_"));
+        assert_eq!(discover_agent_product(&db, "wowt"), Some(ptr));
+    }
+
     #[test]
     fn requested_forever_build_is_selected_without_build_info_row() {
         let fixture = Fixture::new();
