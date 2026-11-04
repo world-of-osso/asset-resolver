@@ -61,7 +61,8 @@ static WOW_INSTALL_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 /// Discovery order:
 /// 1. `WOW_INSTALL_PATH` env var (install root containing `Data/`)
 /// 2. `WOW_DATA_PATH` env var (full path to the `Data/` dir; parent is the root)
-/// 3. A built-in list of common locations (Linux/Wine/Lutris/WSL/macOS).
+/// 3. Battle.net Agent product databases on Windows drives (selected `WOW_PRODUCT`).
+/// 4. A built-in list of common locations (Linux/Wine/Lutris/WSL/macOS).
 ///
 /// A candidate is accepted only if `<root>/Data/data` exists (the directory
 /// holding `.idx`/archive blobs), to avoid matching a non-WoW directory.
@@ -92,12 +93,44 @@ fn discover_wow_install_path() -> Option<PathBuf> {
             }
         }
     }
+    #[cfg(windows)]
+    for letter in 'A'..='Z' {
+        let path = PathBuf::from(format!(
+            "{letter}:\\ProgramData\\Battle.net\\Agent\\product.db"
+        ));
+        match std::fs::read(&path) {
+            Ok(bytes) => match discover_agent_product(&bytes, &selected_wow_product()) {
+                Ok(Some(root)) => return Some(root),
+                Ok(None) => {}
+                Err(error) => eprintln!("read {}: {error}", path.display()),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => eprintln!("read {}: {error}", path.display()),
+        }
+    }
     for candidate in candidate_install_paths() {
         if is_valid_wow_install(&candidate) {
             return Some(candidate);
         }
     }
     None
+}
+
+#[cfg(any(windows, test))]
+fn discover_agent_product(bytes: &[u8], product: &str) -> Result<Option<PathBuf>, String> {
+    let database = cascette_client_storage::decode_agent_product_db(bytes)
+        .map_err(|error| format!("invalid Agent product database: {error}"))?;
+    Ok(database.products.into_iter().find_map(|entry| {
+        if entry.family != "wow" || entry.product_code != product {
+            return None;
+        }
+        let settings = entry.settings?;
+        let root = PathBuf::from(settings.install_location);
+        (!settings.folder_name.is_empty()
+            && is_valid_wow_install(&root)
+            && root.join(settings.folder_name).is_dir())
+        .then_some(root)
+    }))
 }
 
 fn is_valid_wow_install(root: &Path) -> bool {
@@ -862,11 +895,6 @@ mod installed_build_tests {
         field(1, &install)
     }
 
-    // RED seam: replaced by the production decoder in the next change.
-    fn discover_agent_product(_bytes: &[u8], _product: &str) -> Option<PathBuf> {
-        None
-    }
-
     #[test]
     fn agent_database_selects_requested_product_with_valid_layout() {
         let fixture = Fixture::new();
@@ -887,7 +915,15 @@ mod installed_build_tests {
         };
         let mut db = entry("wow", &retail, "_retail_");
         db.extend(entry("wowt", &ptr, "_ptr_"));
-        assert_eq!(discover_agent_product(&db, "wowt"), Some(ptr));
+        assert_eq!(discover_agent_product(&db, "wowt").unwrap(), Some(ptr));
+        assert_eq!(
+            discover_agent_product(&db, "wow").unwrap(),
+            Some(retail.clone())
+        );
+        assert_eq!(discover_agent_product(&db, "wowf").unwrap(), None);
+        std::fs::remove_dir(retail.join("_retail_")).unwrap();
+        assert_eq!(discover_agent_product(&db, "wow").unwrap(), None);
+        assert!(discover_agent_product(&field(1, b"bad"), "wow").is_err());
     }
 
     #[test]
